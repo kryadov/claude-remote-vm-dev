@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%q ' "$@" >> "$TMUX_LOG"
+printf '\n' >> "$TMUX_LOG"
+
+command="${1:-}"
+shift || true
+raw_target=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -t) raw_target="$2"; shift 2 ;;
+    *) break ;;
+  esac
+done
+
+# Mirror real tmux target resolution. has-session/attach/kill-session take a
+# target-session, where the '=' exact-match prefix names a session directly.
+# set-option/show-options/display-message/send-keys take a target-pane, where a
+# bare '=name' is NOT a session reference — it needs a trailing ':' to mean
+# "that session's current pane". Getting this wrong is invisible to a stub that
+# just strips '=', so the stub has to be strict about it.
+case "$command" in
+  has-session|attach|attach-session|kill-session) target_kind="session" ;;
+  *) target_kind="pane" ;;
+esac
+target="${raw_target#=}"
+target="${target%:}"
+if [[ "$target_kind" == "pane" && "$raw_target" == =* && "$raw_target" != *: ]]; then
+  case "$command" in
+    # tmux resolves this to an empty context and prints nothing, exit 0 —
+    # the silent-corruption case.
+    display-message) exit 0 ;;
+    send-keys)
+      echo "can't find pane: $raw_target" >&2
+      exit 1
+      ;;
+    set-option|show-options)
+      echo "no such session: $raw_target" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+case "$command" in
+  has-session)
+    grep -q "^${target}"$'\t' "$TMUX_STATE" 2>/dev/null
+    ;;
+  new-session)
+    name=""
+    path=""
+    envs=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        -d) shift ;;
+        -s) name="$2"; shift 2 ;;
+        -c) path="$2"; shift 2 ;;
+        # Recorded so tests can assert what crossed the tmux boundary.
+        -e) envs="${envs:+$envs }$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf '%s\t%s\tdetached\t%s\n' "$name" "$(date +%s)" "$path" >> "$TMUX_STATE"
+    printf '%s' "$envs" > "$TMUX_STATE.$name.env"
+    ;;
+  set-option)
+    option="$1"
+    value="$2"
+    printf '%s' "$value" > "$TMUX_STATE.$target.${option#@}"
+    ;;
+  list-sessions)
+    format="${2:-}"
+    if [[ "$format" == *'\t'* ]]; then
+      echo "tmux format contains a literal backslash-t" >&2
+      exit 2
+    fi
+    while IFS=$'\t' read -r name created state path; do
+      [[ -n "$name" ]] || continue
+      project="$(cat "$TMUX_STATE.$name.rd_project" 2>/dev/null || true)"
+      session="$(cat "$TMUX_STATE.$name.rd_session" 2>/dev/null || true)"
+      if [[ "$format" == *"@rd_worktree"* ]]; then
+        worktree="$(cat "$TMUX_STATE.$name.rd_worktree" 2>/dev/null || true)"
+        printf '%s\t%s\t%s\t%s\n' "$name" "$project" "$session" "$worktree"
+      elif [[ "$format" == *"@rd_provider"* ]]; then
+        provider="$(cat "$TMUX_STATE.$name.rd_provider" 2>/dev/null || true)"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+          "$name" "$project" "$session" "$created" "$state" "$path" "$provider"
+      else
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+          "$name" "$project" "$session" "$created" "$state" "$path"
+      fi
+    done < "$TMUX_STATE"
+    ;;
+  attach|attach-session)
+    grep -q "^${target}"$'\t' "$TMUX_STATE"
+    ;;
+  display-message)
+    awk -F '\t' -v target="$target" '$1 == target { print $4; exit }' "$TMUX_STATE"
+    ;;
+  show-options)
+    option="${!#}"
+    metadata="$TMUX_STATE.$target.${option#@}"
+    [[ -f "$metadata" ]] || exit 1
+    cat "$metadata"
+    ;;
+  kill-session)
+    awk -F '\t' -v target="$target" '$1 != target' "$TMUX_STATE" > "$TMUX_STATE.tmp"
+    mv "$TMUX_STATE.tmp" "$TMUX_STATE"
+    ;;
+  send-keys) ;;
+  *) exit 0 ;;
+esac

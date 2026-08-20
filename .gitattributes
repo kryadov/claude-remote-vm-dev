@@ -1,0 +1,12 @@
+# Shell scripts and Unix config files run on Linux VMs — force LF so CRLF from
+# Windows checkouts never breaks bash / systemd / sshd parsing.
+*.sh            text eol=lf
+bin/rd-*        text eol=lf
+tests/stubs/*   text eol=lf
+connect.sh      text eol=lf
+bootstrap.sh    text eol=lf
+*.nft           text eol=lf
+*.conf          text eol=lf
+*.service       text eol=lf
+rd.env.example  text eol=lf
+20auto-upgrades text eol=lf

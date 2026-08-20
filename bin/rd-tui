@@ -1,0 +1,412 @@
+#!/usr/bin/env bash
+# Interactive session picker for the rd-* helpers.
+#
+#   rd-tui
+#
+# Arrow keys (or j/k) move, enter attaches (starting a stopped session first),
+# s stops, x removes a stopped session's worktree, n walks through creating a
+# new one, r refreshes, q quits. Attaching replaces this process with tmux, so
+# detaching with Ctrl-b d drops you back to the shell.
+#
+# All state changes go through rd-start / rd-attach / rd-stop / rd-remove:
+# collision, dirty-worktree and still-running checks live there, not here.
+set -euo pipefail
+
+RD_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+ESC=$'\033'
+BOLD="${ESC}[1m"
+DIM="${ESC}[2m"
+REVERSE="${ESC}[7m"
+RESET="${ESC}[0m"
+
+# Without a terminal (tests, pipes) skip the alternate screen so the frames
+# stay plain text.
+INTERACTIVE=0
+[[ -t 1 ]] && INTERACTIVE=1
+
+# --- terminal -----------------------------------------------------------------
+
+term_setup() {
+  if [[ "$INTERACTIVE" -eq 1 ]]; then
+    tput smcup 2>/dev/null || true
+    tput civis 2>/dev/null || true
+  fi
+}
+
+term_restore() {
+  if [[ "$INTERACTIVE" -eq 1 ]]; then
+    tput cnorm 2>/dev/null || true
+    tput rmcup 2>/dev/null || true
+  fi
+}
+
+cursor_show() { [[ "$INTERACTIVE" -eq 1 ]] && tput cnorm 2>/dev/null; return 0; }
+cursor_hide() { [[ "$INTERACTIVE" -eq 1 ]] && tput civis 2>/dev/null; return 0; }
+
+trap term_restore EXIT
+trap 'term_restore; exit 130' INT
+
+# Hand the terminal back before replacing ourselves with tmux — exec skips traps.
+exec_command() {
+  term_restore
+  trap - EXIT
+  exec "$@"
+}
+
+clear_screen() {
+  [[ "$INTERACTIVE" -eq 1 ]] && printf '%s[H%s[2J' "$ESC" "$ESC"
+  return 0
+}
+
+# Reads one keypress into KEY as a symbolic name: up/down/left/right/enter/esc
+# or the literal character. Returns non-zero at end of input.
+KEY=""
+read_key() {
+  local key rest
+  KEY=""
+  IFS= read -rsn1 key || return 1
+  case "$key" in
+    "$ESC")
+      rest=""
+      IFS= read -rsn2 -t 0.05 rest || true
+      case "$rest" in
+        '[A') KEY="up" ;;
+        '[B') KEY="down" ;;
+        '[C') KEY="right" ;;
+        '[D') KEY="left" ;;
+        '') KEY="esc" ;;
+        *) KEY="unknown" ;;
+      esac
+      ;;
+    '') KEY="enter" ;;
+    *) KEY="$key" ;;
+  esac
+  return 0
+}
+
+pause_key() {
+  printf '\n%sPress any key to continue.%s\n' "$DIM" "$RESET"
+  read_key || true
+}
+
+# --- data ---------------------------------------------------------------------
+
+STATES=()
+PROJECTS=()
+SESSIONS=()
+BRANCHES=()
+DIRS=()
+PROVIDERS=()
+CURSOR=0
+MESSAGE=""
+
+load_sessions() {
+  local porcelain state project session branch dir created provider
+  STATES=()
+  PROJECTS=()
+  SESSIONS=()
+  BRANCHES=()
+  DIRS=()
+  PROVIDERS=()
+  porcelain="$("$RD_BIN/rd-list" --porcelain --all)"
+  while IFS=$'\t' read -r state project session branch dir created provider; do
+    [[ -n "$state" ]] || continue
+    : "${created:-}"
+    STATES+=("$state")
+    PROJECTS+=("$project")
+    SESSIONS+=("$session")
+    BRANCHES+=("${branch:--}")
+    DIRS+=("$dir")
+    PROVIDERS+=("${provider:--}")
+  done <<< "$porcelain"
+  if (( CURSOR >= ${#STATES[@]} )); then
+    CURSOR=0
+  fi
+}
+
+# Every project that could host a new session: cloned repos plus anything that
+# already has a session (a repo started from an out-of-tree path).
+list_projects() {
+  {
+    shopt -s nullglob
+    local dir project
+    for dir in "$HOME"/projects/*; do
+      [[ -d "$dir" ]] && basename "$dir"
+    done
+    shopt -u nullglob
+    if (( ${#PROJECTS[@]} > 0 )); then
+      for project in "${PROJECTS[@]}"; do
+        printf '%s\n' "$project"
+      done
+    fi
+  } | LC_ALL=C sort -u
+}
+
+# --- rendering ----------------------------------------------------------------
+
+# Widths follow the data, so a long project or branch name cannot push the
+# columns out of alignment; a cap keeps one outlier from squeezing out DIR.
+# Names are ASCII (rd-start enforces it), so length is display width here.
+column_width() {
+  local width="${#1}" cap="$2" value
+  shift 2
+  for value in "$@"; do
+    if (( ${#value} > width )); then
+      width="${#value}"
+    fi
+  done
+  if (( width > cap )); then
+    width="$cap"
+  fi
+  printf '%s' "$width"
+}
+
+fit() {
+  local value="$1" width="$2"
+  if (( ${#value} > width )); then
+    printf '%s...' "${value:0:width - 3}"
+  else
+    printf '%s' "$value"
+  fi
+}
+
+render_list() {
+  local index line pw sw vw bw
+  clear_screen
+  printf '%sClaude sessions%s  %s%s%s\n\n' \
+    "$BOLD" "$RESET" "$DIM" "$(hostname 2>/dev/null || echo VM)" "$RESET"
+
+  if (( ${#STATES[@]} == 0 )); then
+    printf '  No sessions yet — press n to start one.\n'
+  else
+    pw="$(column_width PROJECT 24 "${PROJECTS[@]}")"
+    sw="$(column_width SESSION 20 "${SESSIONS[@]}")"
+    vw="$(column_width PROVIDER 12 "${PROVIDERS[@]}")"
+    bw="$(column_width BRANCH 30 "${BRANCHES[@]}")"
+    printf "  %-${pw}s %-${sw}s %-9s %-${vw}s %-${bw}s %s\n" PROJECT SESSION STATE PROVIDER BRANCH DIR
+    for index in "${!STATES[@]}"; do
+      printf -v line " %-${pw}s %-${sw}s %-9s %-${vw}s %-${bw}s %s" \
+        "$(fit "${PROJECTS[$index]}" "$pw")" "$(fit "${SESSIONS[$index]}" "$sw")" \
+        "${STATES[$index]}" "$(fit "${PROVIDERS[$index]}" "$vw")" \
+        "$(fit "${BRANCHES[$index]}" "$bw")" "${DIRS[$index]}"
+      if (( index == CURSOR )); then
+        printf '%s>%s%s\n' "$REVERSE" "$line" "$RESET"
+      else
+        printf ' %s\n' "$line"
+      fi
+    done
+  fi
+
+  printf '\n  %sarrows move   enter attach   s stop   x remove   n new   r refresh   q quit%s\n' \
+    "$DIM" "$RESET"
+  if [[ -n "$MESSAGE" ]]; then
+    printf '\n  %s\n' "$MESSAGE"
+  fi
+  return 0
+}
+
+# Runs an rd-* command, showing its output; on failure it waits for a keypress
+# so the error stays readable before the list is redrawn.
+run_command() {
+  local output status
+  clear_screen
+  printf '%s$ %s%s\n\n' "$DIM" "$*" "$RESET"
+  set +e
+  output="$("$@" 2>&1)"
+  status=$?
+  set -e
+  if [[ -n "$output" ]]; then
+    printf '%s\n' "$output"
+  fi
+  if (( status != 0 )); then
+    printf '\n%sCommand failed (exit %d).%s\n' "$BOLD" "$status" "$RESET"
+    pause_key
+  fi
+  return "$status"
+}
+
+# --- input widgets ------------------------------------------------------------
+# These render to stdout like the rest of the TUI, so they return their result
+# in a global instead of through a command substitution.
+
+CHOICE=""
+choose_from() {
+  local title="$1"
+  shift
+  local items=("$@")
+  local index=0 i
+  CHOICE=""
+  (( ${#items[@]} > 0 )) || return 1
+  while true; do
+    clear_screen
+    printf '%s%s%s\n\n' "$BOLD" "$title" "$RESET"
+    for i in "${!items[@]}"; do
+      if (( i == index )); then
+        printf '%s> %s%s\n' "$REVERSE" "${items[$i]}" "$RESET"
+      else
+        printf '  %s\n' "${items[$i]}"
+      fi
+    done
+    printf '\n  %sarrows move   enter select   esc cancel%s\n' "$DIM" "$RESET"
+
+    read_key || return 1
+    case "$KEY" in
+      up|k) if (( index > 0 )); then index=$((index - 1)); fi ;;
+      down|j) if (( index < ${#items[@]} - 1 )); then index=$((index + 1)); fi ;;
+      enter) CHOICE="${items[$index]}"; return 0 ;;
+      esc|q) return 1 ;;
+    esac
+  done
+}
+
+ANSWER=""
+prompt_line() {
+  ANSWER=""
+  printf '%s' "$1"
+  cursor_show
+  if ! IFS= read -r ANSWER; then
+    cursor_hide
+    return 1
+  fi
+  cursor_hide
+  return 0
+}
+
+confirm() {
+  printf '\n  %s [y/N] ' "$1"
+  read_key || return 1
+  printf '\n'
+  [[ "$KEY" == "y" || "$KEY" == "Y" ]]
+}
+
+# --- actions ------------------------------------------------------------------
+# Every action returns 0: a non-zero return would trip set -e in the main loop.
+
+# Emits the --session flag pair unless this is the default session.
+session_args() {
+  [[ "$1" == "default" ]] || printf -- '--session\n%s\n' "$1"
+  return 0
+}
+
+action_attach() {
+  local index="$1"
+  local project="${PROJECTS[$index]}" session="${SESSIONS[$index]}" state="${STATES[$index]}"
+  local args=()
+  mapfile -t args < <(session_args "$session")
+
+  if [[ "$state" == "stopped" ]]; then
+    if ! run_command "$RD_BIN/rd-start" "$project" ${args[@]+"${args[@]}"}; then
+      MESSAGE="Could not start $project/$session."
+      return 0
+    fi
+  fi
+  exec_command "$RD_BIN/rd-attach" "$project" ${args[@]+"${args[@]}"}
+}
+
+action_stop() {
+  local index="$1"
+  local project="${PROJECTS[$index]}" session="${SESSIONS[$index]}" state="${STATES[$index]}"
+  local args=()
+  if [[ "$state" == "stopped" ]]; then
+    MESSAGE="$project/$session is already stopped."
+    return 0
+  fi
+  if ! confirm "Stop $project/$session?"; then
+    MESSAGE="Cancelled."
+    return 0
+  fi
+  mapfile -t args < <(session_args "$session")
+  if run_command "$RD_BIN/rd-stop" "$project" ${args[@]+"${args[@]}"}; then
+    MESSAGE="Stopped $project/$session."
+  else
+    MESSAGE="Could not stop $project/$session."
+  fi
+  return 0
+}
+
+action_remove() {
+  local index="$1"
+  local project="${PROJECTS[$index]}" session="${SESSIONS[$index]}" state="${STATES[$index]}"
+  if [[ "$state" != "stopped" ]]; then
+    MESSAGE="Stop $project/$session before removing its worktree."
+    return 0
+  fi
+  if [[ "$session" == "default" ]]; then
+    MESSAGE="The default session has no worktree to remove."
+    return 0
+  fi
+  if ! confirm "Remove worktree of $project/$session? (the branch is kept)"; then
+    MESSAGE="Cancelled."
+    return 0
+  fi
+  if run_command "$RD_BIN/rd-remove" "$project" --session "$session"; then
+    MESSAGE="Removed worktree of $project/$session."
+  else
+    MESSAGE="Could not remove $project/$session."
+  fi
+  return 0
+}
+
+action_new() {
+  local project session args=()
+  local projects=()
+  mapfile -t projects < <(list_projects)
+  if (( ${#projects[@]} == 0 )); then
+    MESSAGE="No projects in ~/projects — clone one with: rd-start <project> <git-url>"
+    return 0
+  fi
+
+  if ! choose_from "New session — pick a project" "${projects[@]}"; then
+    MESSAGE="Cancelled."
+    return 0
+  fi
+  project="$CHOICE"
+
+  clear_screen
+  printf '%sNew session in %s%s\n\n' "$BOLD" "$project" "$RESET"
+  if ! prompt_line '  Session name (enter for default): '; then
+    MESSAGE="Cancelled."
+    return 0
+  fi
+  session="${ANSWER:-default}"
+
+  if [[ "$session" != "default" ]]; then
+    if ! choose_from "Branch type for $project/$session" feature bugfix; then
+      MESSAGE="Cancelled."
+      return 0
+    fi
+    args=(--session "$session" --type "$CHOICE")
+  fi
+
+  if ! run_command "$RD_BIN/rd-start" "$project" ${args[@]+"${args[@]}"}; then
+    MESSAGE="Could not start $project/$session."
+    return 0
+  fi
+  mapfile -t args < <(session_args "$session")
+  exec_command "$RD_BIN/rd-attach" "$project" ${args[@]+"${args[@]}"}
+}
+
+# --- main loop ----------------------------------------------------------------
+
+term_setup
+load_sessions
+
+while true; do
+  render_list
+  MESSAGE=""
+  read_key || break
+  case "$KEY" in
+    up|k) if (( CURSOR > 0 )); then CURSOR=$((CURSOR - 1)); fi ;;
+    down|j) if (( CURSOR < ${#STATES[@]} - 1 )); then CURSOR=$((CURSOR + 1)); fi ;;
+    enter) if (( ${#STATES[@]} > 0 )); then action_attach "$CURSOR"; fi ;;
+    s) if (( ${#STATES[@]} > 0 )); then action_stop "$CURSOR"; load_sessions; fi ;;
+    x) if (( ${#STATES[@]} > 0 )); then action_remove "$CURSOR"; load_sessions; fi ;;
+    n) action_new; load_sessions ;;
+    r) load_sessions; MESSAGE="Refreshed." ;;
+    q|esc) break ;;
+  esac
+done
+
+term_restore
+trap - EXIT

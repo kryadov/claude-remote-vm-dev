@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+# Add an idempotent project-scoped VS Code task that attaches by worktree.
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  echo "usage: rd-vscode-init <repo-path>" >&2
+  exit 2
+fi
+
+REPO_PATH="$1"
+[[ -d "$REPO_PATH" ]] || {
+  echo "rd-vscode-init: directory does not exist: $REPO_PATH" >&2
+  exit 1
+}
+
+mkdir -p "$REPO_PATH/.vscode"
+TASKS_FILE="$REPO_PATH/.vscode/tasks.json"
+
+python3 - "$TASKS_FILE" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+
+def strip_jsonc(source: str) -> str:
+    """Remove JSONC comments and trailing commas without touching strings."""
+    out = []
+    i = 0
+    in_string = False
+    escaped = False
+    while i < len(source):
+        char = source[i]
+        next_char = source[i + 1] if i + 1 < len(source) else ""
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            i += 1
+            continue
+        if char == '"':
+            in_string = True
+            out.append(char)
+            i += 1
+            continue
+        if char == "/" and next_char == "/":
+            out.extend("  ")
+            i += 2
+            while i < len(source) and source[i] not in "\r\n":
+                out.append(" ")
+                i += 1
+            continue
+        if char == "/" and next_char == "*":
+            out.extend("  ")
+            i += 2
+            while i < len(source):
+                if i + 1 < len(source) and source[i : i + 2] == "*/":
+                    out.extend("  ")
+                    i += 2
+                    break
+                out.append("\n" if source[i] == "\n" else " ")
+                i += 1
+            continue
+        out.append(char)
+        i += 1
+
+    uncommented = "".join(out)
+    out = []
+    i = 0
+    in_string = False
+    escaped = False
+    while i < len(uncommented):
+        char = uncommented[i]
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            i += 1
+            continue
+        if char == '"':
+            in_string = True
+            out.append(char)
+            i += 1
+            continue
+        if char == ",":
+            lookahead = i + 1
+            while lookahead < len(uncommented) and uncommented[lookahead].isspace():
+                lookahead += 1
+            if lookahead < len(uncommented) and uncommented[lookahead] in "]}":
+                i += 1
+                continue
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
+def scan_jsonc_tokens(source: str):
+    """Return significant JSONC tokens with their original source offsets."""
+    tokens = []
+    i = 0
+    while i < len(source):
+        char = source[i]
+        next_char = source[i + 1] if i + 1 < len(source) else ""
+        if char.isspace():
+            i += 1
+            continue
+        if char == "/" and next_char == "/":
+            i += 2
+            while i < len(source) and source[i] not in "\r\n":
+                i += 1
+            continue
+        if char == "/" and next_char == "*":
+            end = source.find("*/", i + 2)
+            i = len(source) if end < 0 else end + 2
+            continue
+        if char == '"':
+            start = i
+            i += 1
+            escaped = False
+            while i < len(source):
+                current = source[i]
+                i += 1
+                if escaped:
+                    escaped = False
+                elif current == "\\":
+                    escaped = True
+                elif current == '"':
+                    break
+            raw = source[start:i]
+            tokens.append(("string", json.loads(raw), start, i))
+            continue
+        if char in "{}[]:,":
+            tokens.append((char, char, i, i + 1))
+            i += 1
+            continue
+        start = i
+        while i < len(source) and not source[i].isspace() and source[i] not in "{}[]:,/":
+            i += 1
+        tokens.append(("literal", source[start:i], start, i))
+    return tokens
+
+
+def insert_task_preserving_jsonc(source: str, task: dict) -> str:
+    tokens = scan_jsonc_tokens(source)
+    object_depth = 0
+    array_depth = 0
+    open_index = None
+    for index, token in enumerate(tokens):
+        kind, value, _start, _end = token
+        if kind == "string" and value == "tasks" and object_depth == 1 and array_depth == 0:
+            if index + 2 < len(tokens) and tokens[index + 1][0] == ":" and tokens[index + 2][0] == "[":
+                open_index = index + 2
+                break
+        if kind == "{":
+            object_depth += 1
+        elif kind == "}":
+            object_depth -= 1
+        elif kind == "[":
+            array_depth += 1
+        elif kind == "]":
+            array_depth -= 1
+
+    if open_index is None:
+        raise ValueError("existing file has no top-level tasks array")
+
+    depth = 0
+    close_index = None
+    for index in range(open_index, len(tokens)):
+        kind = tokens[index][0]
+        if kind == "[":
+            depth += 1
+        elif kind == "]":
+            depth -= 1
+            if depth == 0:
+                close_index = index
+                break
+    if close_index is None:
+        raise ValueError("tasks array is not closed")
+
+    close_position = tokens[close_index][2]
+    line_start = source.rfind("\n", 0, close_position) + 1
+    closing_prefix = source[line_start:close_position]
+    if closing_prefix.strip():
+        insert_position = close_position
+        closing_indent = ""
+    else:
+        insert_position = line_start
+        closing_indent = closing_prefix
+    item_indent = closing_indent + "  "
+    rendered_task = json.dumps(task, indent=2, ensure_ascii=False)
+    rendered_task = "\n".join(item_indent + line for line in rendered_task.splitlines())
+
+    previous = tokens[close_index - 1]
+    if previous[0] != "[" and previous[0] != ",":
+        source = source[: previous[3]] + "," + source[previous[3] :]
+        if previous[3] <= insert_position:
+            insert_position += 1
+
+    prefix = "" if insert_position == line_start else "\n"
+    insertion = prefix + rendered_task + "\n"
+    return source[:insert_position] + insertion + source[insert_position:]
+
+
+path = Path(sys.argv[1])
+if path.exists():
+    original = path.read_text(encoding="utf-8")
+    try:
+        data = json.loads(strip_jsonc(original))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        print(f"rd-vscode-init: invalid existing {path}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+else:
+    data = {"version": "2.0.0", "tasks": []}
+
+if not isinstance(data, dict) or not isinstance(data.get("tasks", []), list):
+    print(f"rd-vscode-init: {path} must contain a JSON object with a tasks array", file=sys.stderr)
+    raise SystemExit(1)
+
+data.setdefault("version", "2.0.0")
+tasks = data.setdefault("tasks", [])
+label = "Remote Dev: Attach Claude"
+task = {
+    "label": label,
+    "type": "shell",
+    "command": "rd-attach-here",
+    "runOptions": {"runOn": "folderOpen"},
+    "problemMatcher": [],
+    "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": False,
+        "clear": False,
+    },
+}
+
+matches = [
+    index
+    for index, existing in enumerate(tasks)
+    if isinstance(existing, dict) and existing.get("label") == label
+]
+if path.exists() and matches:
+    if len(matches) != 1 or tasks[matches[0]] != task:
+        print(
+            f"rd-vscode-init: task '{label}' already exists with different settings in {path}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    rendered = original
+elif path.exists():
+    try:
+        rendered = insert_task_preserving_jsonc(original, task)
+    except ValueError as exc:
+        print(f"rd-vscode-init: cannot update {path}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+else:
+    tasks.append(task)
+    rendered = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+
+if not path.exists() or original != rendered:
+    fd, temporary = tempfile.mkstemp(prefix="tasks.", suffix=".json", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(rendered)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+PY
+
+echo "Configured VS Code automatic Claude attach in $TASKS_FILE"
+echo "On first open, trust the workspace and allow automatic tasks."

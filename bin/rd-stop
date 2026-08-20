@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Stop a Claude Code session without removing its worktree or branch.
+set -euo pipefail
+
+usage() {
+  echo "usage: rd-stop <project> [--session <name>]" >&2
+  exit 2
+}
+
+[[ $# -ge 1 ]] || usage
+PROJECT="$1"
+shift
+RD_SESSION="default"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --session)
+      [[ $# -ge 2 ]] || usage
+      RD_SESSION="$2"
+      shift 2
+      ;;
+    *) usage ;;
+  esac
+done
+
+if [[ "$RD_SESSION" == "default" ]]; then
+  TARGET="claude-$PROJECT"
+else
+  TARGET="claude-$PROJECT--$RD_SESSION"
+fi
+
+if tmux has-session -t "=$TARGET" 2>/dev/null; then
+  existing_project="$(tmux show-options -t "=$TARGET:" -qv @rd_project 2>/dev/null || true)"
+  existing_session="$(tmux show-options -t "=$TARGET:" -qv @rd_session 2>/dev/null || true)"
+  if [[ "$RD_SESSION" == "default" ]]; then
+    if [[ -n "$existing_project" && ( "$existing_project" != "$PROJECT" || "${existing_session:-default}" != "default" ) ]]; then
+      echo "rd-stop: tmux name collision: '$TARGET' belongs to $existing_project/${existing_session:-default}" >&2
+      exit 1
+    fi
+  elif [[ "$existing_project" != "$PROJECT" || "$existing_session" != "$RD_SESSION" ]]; then
+    echo "rd-stop: tmux name collision: '$TARGET' is not $PROJECT/$RD_SESSION" >&2
+    exit 1
+  fi
+fi
+tmux kill-session -t "=$TARGET"
+echo "Stopped $TARGET"

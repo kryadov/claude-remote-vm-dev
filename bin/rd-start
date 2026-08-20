@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+# Start (or reuse) a durable Claude Code session in tmux.
+set -euo pipefail
+
+usage() {
+  echo "usage: rd-start <project> [git-url|path] [--session <name>] [--type feature|bugfix] [--base <ref>] [--branch feature/<name>|bugfix/<name>] [--provider <name>]" >&2
+  exit 2
+}
+
+[[ $# -ge 1 ]] || usage
+PROJECT="$1"
+shift
+
+valid_name() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]
+}
+
+valid_name "$PROJECT" || {
+  echo "rd-start: invalid project name '$PROJECT' (use letters, digits, '_' or '-')" >&2
+  exit 2
+}
+
+SRC=""
+RD_SESSION="default"
+BRANCH_TYPE="feature"
+TYPE_EXPLICIT=0
+BASE="HEAD"
+BRANCH=""
+BRANCH_EXPLICIT=0
+PROVIDER=""
+PROVIDER_EXPLICIT=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --session)
+      [[ $# -ge 2 ]] || usage
+      RD_SESSION="$2"
+      shift 2
+      ;;
+    --type)
+      [[ $# -ge 2 ]] || usage
+      BRANCH_TYPE="$2"
+      TYPE_EXPLICIT=1
+      shift 2
+      ;;
+    --base)
+      [[ $# -ge 2 ]] || usage
+      BASE="$2"
+      shift 2
+      ;;
+    --branch)
+      [[ $# -ge 2 ]] || usage
+      BRANCH="$2"
+      BRANCH_EXPLICIT=1
+      shift 2
+      ;;
+    --provider)
+      [[ $# -ge 2 ]] || usage
+      PROVIDER="$2"
+      PROVIDER_EXPLICIT=1
+      shift 2
+      ;;
+    --*) usage ;;
+    *)
+      [[ -z "$SRC" ]] || usage
+      SRC="$1"
+      shift
+      ;;
+  esac
+done
+
+valid_name "$RD_SESSION" || {
+  echo "rd-start: invalid session name '$RD_SESSION' (use letters, digits, '_' or '-')" >&2
+  exit 2
+}
+
+[[ "$BRANCH_TYPE" == "feature" || "$BRANCH_TYPE" == "bugfix" ]] || {
+  echo "rd-start: --type must be 'feature' or 'bugfix'" >&2
+  exit 2
+}
+
+# --- Model provider ----------------------------------------------------------
+# The session's provider is decided here and read by the pane's login shell
+# (tmux starts panes as login shells, so ~/.profile sources the provider file).
+# Only the provider NAME crosses the tmux boundary; the credentials stay in the
+# 0600 file, out of `ps` output and out of the tmux session environment.
+RD_CONFIG_DIR="${RD_CONFIG_DIR:-$HOME/.config/rd}"
+PROVIDER_DIR="$RD_CONFIG_DIR/providers"
+
+configured_providers() {
+  local file
+  shopt -s nullglob
+  for file in "$PROVIDER_DIR"/*.env; do
+    basename "$file" .env
+  done
+  shopt -u nullglob
+}
+
+if [[ -z "$PROVIDER" ]]; then
+  PROVIDER="$(cat "$RD_CONFIG_DIR/provider" 2>/dev/null || true)"
+  PROVIDER="${PROVIDER%%$'\n'*}"
+  PROVIDER="${PROVIDER:-vertex}"
+fi
+
+if [[ ! -r "$PROVIDER_DIR/$PROVIDER.env" ]]; then
+  available="$(configured_providers | paste -sd' ' -)"
+  if [[ "$PROVIDER_EXPLICIT" -eq 0 && -z "$available" ]]; then
+    # A VM provisioned before provider files existed: leave the session to
+    # whatever ~/.profile already exports and record no provider.
+    PROVIDER=""
+  else
+    echo "rd-start: provider '$PROVIDER' is not configured in $PROVIDER_DIR" >&2
+    echo "          configured: ${available:-<none — run bootstrap.sh, then rd-auth>}" >&2
+    exit 2
+  fi
+fi
+
+MAIN_WORKDIR="$HOME/projects/$PROJECT"
+if [[ -n "$SRC" ]]; then
+  if [[ "$SRC" == *://* || "$SRC" == git@* ]]; then
+    if [[ ! -d "$MAIN_WORKDIR/.git" ]]; then
+      echo "Cloning $SRC -> $MAIN_WORKDIR"
+      git clone "$SRC" "$MAIN_WORKDIR"
+    else
+      echo "Repo already present in $MAIN_WORKDIR (skipping clone)."
+    fi
+  else
+    MAIN_WORKDIR="$SRC"
+  fi
+fi
+
+if [[ "$RD_SESSION" == "default" ]]; then
+  TMUX_SESSION="claude-$PROJECT"
+else
+  TMUX_SESSION="claude-$PROJECT--$RD_SESSION"
+fi
+
+tmux_option() {
+  tmux show-options -t "=$TMUX_SESSION:" -qv "$1" 2>/dev/null || true
+}
+
+TMUX_EXISTS=0
+if tmux has-session -t "=$TMUX_SESSION" 2>/dev/null; then
+  TMUX_EXISTS=1
+  existing_project="$(tmux_option @rd_project)"
+  existing_session="$(tmux_option @rd_session)"
+  if [[ "$RD_SESSION" == "default" ]]; then
+    if [[ -n "$existing_project" && ( "$existing_project" != "$PROJECT" || "${existing_session:-default}" != "default" ) ]]; then
+      echo "rd-start: tmux name collision: '$TMUX_SESSION' belongs to $existing_project/${existing_session:-default}" >&2
+      exit 1
+    fi
+  elif [[ "$existing_project" != "$PROJECT" || "$existing_session" != "$RD_SESSION" ]]; then
+    echo "rd-start: tmux name collision: '$TMUX_SESSION' is not $PROJECT/$RD_SESSION" >&2
+    exit 1
+  fi
+fi
+
+if [[ "$RD_SESSION" == "default" ]]; then
+  WORKDIR="$MAIN_WORKDIR"
+  mkdir -p "$WORKDIR"
+  WORKDIR="$(cd "$WORKDIR" && pwd -P)"
+else
+  git -C "$MAIN_WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+    echo "rd-start: named sessions require a Git repository: $MAIN_WORKDIR" >&2
+    exit 1
+  }
+  MAIN_WORKDIR="$(cd "$MAIN_WORKDIR" && pwd -P)"
+
+  WORKDIR="$HOME/worktrees/$PROJECT/$RD_SESSION"
+  BRANCH="${BRANCH:-$BRANCH_TYPE/$RD_SESSION}"
+  case "$BRANCH" in
+    feature/*|bugfix/*) ;;
+    *)
+      echo "rd-start: branch must start with feature/ or bugfix/" >&2
+      exit 2
+      ;;
+  esac
+  git check-ref-format --branch "$BRANCH" >/dev/null
+
+  if [[ ! -e "$WORKDIR" ]]; then
+    mkdir -p "$(dirname "$WORKDIR")"
+    if git -C "$MAIN_WORKDIR" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+      git -C "$MAIN_WORKDIR" worktree add "$WORKDIR" "$BRANCH"
+    else
+      git -C "$MAIN_WORKDIR" worktree add -b "$BRANCH" "$WORKDIR" "$BASE"
+    fi
+  else
+    main_common="$(git -C "$MAIN_WORKDIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    worktree_common="$(git -C "$WORKDIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    if [[ -z "$worktree_common" || "$worktree_common" != "$main_common" ]]; then
+      echo "rd-start: existing path is not a worktree of $MAIN_WORKDIR: $WORKDIR" >&2
+      exit 1
+    fi
+    existing_branch="$(git -C "$WORKDIR" branch --show-current)"
+    if [[ "$TYPE_EXPLICIT" -eq 0 && "$BRANCH_EXPLICIT" -eq 0 ]]; then
+      BRANCH="$existing_branch"
+    elif [[ "$existing_branch" != "$BRANCH" ]]; then
+      echo "rd-start: worktree $WORKDIR uses '$existing_branch', expected '$BRANCH'" >&2
+      exit 1
+    fi
+  fi
+  WORKDIR="$(cd "$WORKDIR" && pwd -P)"
+fi
+
+if [[ "$TMUX_EXISTS" -eq 1 ]]; then
+  if [[ "$RD_SESSION" == "default" ]]; then
+    stored_worktree="$(tmux_option @rd_worktree)"
+    if [[ -n "$stored_worktree" && -d "$stored_worktree" ]]; then
+      WORKDIR="$(cd "$stored_worktree" && pwd -P)"
+    else
+      pane_path="$(tmux display-message -t "=$TMUX_SESSION:" -p '#{pane_current_path}' 2>/dev/null || true)"
+      if [[ -d "$pane_path" ]]; then
+        repo_root="$(git -C "$pane_path" rev-parse --show-toplevel 2>/dev/null || true)"
+        pane_path="${repo_root:-$pane_path}"
+        WORKDIR="$(cd "$pane_path" && pwd -P)"
+      fi
+    fi
+  fi
+  # A pane's environment is fixed when it is created, so a --provider that
+  # disagrees with the running session would be a lie if accepted silently.
+  existing_provider="$(tmux_option @rd_provider)"
+  if [[ "$PROVIDER_EXPLICIT" -eq 1 && -n "$existing_provider" && "$existing_provider" != "$PROVIDER" ]]; then
+    echo "rd-start: session '$TMUX_SESSION' already runs on provider '$existing_provider', not '$PROVIDER'." >&2
+    echo "          Stop it first, then start it again: rd-stop $PROJECT" >&2
+    exit 1
+  fi
+  tmux set-option -t "=$TMUX_SESSION:" @rd_project "$PROJECT"
+  tmux set-option -t "=$TMUX_SESSION:" @rd_session "$RD_SESSION"
+  tmux set-option -t "=$TMUX_SESSION:" @rd_worktree "$WORKDIR"
+  if [[ -n "${existing_provider:-$PROVIDER}" ]]; then
+    tmux set-option -t "=$TMUX_SESSION:" @rd_provider "${existing_provider:-$PROVIDER}"
+  fi
+  if [[ "$RD_SESSION" == "default" ]]; then
+    attach_hint="rd-attach $PROJECT"
+  else
+    attach_hint="rd-attach $PROJECT --session $RD_SESSION"
+  fi
+  echo "Session '$TMUX_SESSION' already running. Attach with: $attach_hint"
+  exit 0
+fi
+
+# Without --provider the login shell picks the default up from
+# ~/.config/rd/provider on its own, so nothing has to cross the boundary.
+if [[ "$PROVIDER_EXPLICIT" -eq 1 ]]; then
+  tmux new-session -d -s "$TMUX_SESSION" -c "$WORKDIR" -e RD_PROVIDER="$PROVIDER"
+else
+  tmux new-session -d -s "$TMUX_SESSION" -c "$WORKDIR"
+fi
+tmux set-option -t "=$TMUX_SESSION:" @rd_project "$PROJECT"
+tmux set-option -t "=$TMUX_SESSION:" @rd_session "$RD_SESSION"
+tmux set-option -t "=$TMUX_SESSION:" @rd_worktree "$WORKDIR"
+if [[ -n "$PROVIDER" ]]; then
+  tmux set-option -t "=$TMUX_SESSION:" @rd_provider "$PROVIDER"
+fi
+tmux send-keys -t "=$TMUX_SESSION:" 'claude --dangerously-skip-permissions' C-m
+
+if [[ -n "$PROVIDER" ]]; then
+  echo "Started '$TMUX_SESSION' in $WORKDIR (provider: $PROVIDER)."
+else
+  echo "Started '$TMUX_SESSION' in $WORKDIR."
+fi
+if [[ "$RD_SESSION" == "default" ]]; then
+  echo "Attach with: rd-attach $PROJECT   (detach: Ctrl-b then d)"
+else
+  echo "Attach with: rd-attach $PROJECT --session $RD_SESSION   (detach: Ctrl-b then d)"
+fi

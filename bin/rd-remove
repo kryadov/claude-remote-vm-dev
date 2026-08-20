@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Remove a stopped named session's worktree, optionally deleting its branch.
+set -euo pipefail
+
+usage() {
+  echo "usage: rd-remove <project> --session <name> [--delete-branch]" >&2
+  exit 2
+}
+
+[[ $# -ge 1 ]] || usage
+PROJECT="$1"
+shift
+RD_SESSION=""
+DELETE_BRANCH=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --session)
+      [[ $# -ge 2 ]] || usage
+      RD_SESSION="$2"
+      shift 2
+      ;;
+    --delete-branch)
+      DELETE_BRANCH=1
+      shift
+      ;;
+    *) usage ;;
+  esac
+done
+
+[[ -n "$RD_SESSION" && "$RD_SESSION" != "default" ]] || {
+  echo "rd-remove: a non-default --session is required" >&2
+  exit 2
+}
+[[ "$PROJECT" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || usage
+[[ "$RD_SESSION" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || usage
+
+TARGET="claude-$PROJECT--$RD_SESSION"
+WORKTREE="$HOME/worktrees/$PROJECT/$RD_SESSION"
+
+if tmux has-session -t "=$TARGET" 2>/dev/null; then
+  existing_project="$(tmux show-options -t "=$TARGET:" -qv @rd_project 2>/dev/null || true)"
+  existing_session="$(tmux show-options -t "=$TARGET:" -qv @rd_session 2>/dev/null || true)"
+  if [[ "$existing_project" != "$PROJECT" || "$existing_session" != "$RD_SESSION" ]]; then
+    echo "rd-remove: tmux name collision: '$TARGET' is not $PROJECT/$RD_SESSION" >&2
+    exit 1
+  fi
+  echo "rd-remove: session '$TARGET' is still running; stop it first" >&2
+  exit 1
+fi
+[[ -e "$WORKTREE" ]] || {
+  echo "rd-remove: worktree does not exist: $WORKTREE" >&2
+  exit 1
+}
+
+BRANCH="$(git -C "$WORKTREE" branch --show-current 2>/dev/null || true)"
+COMMON_DIR="$(git -C "$WORKTREE" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+[[ -n "$BRANCH" && -n "$COMMON_DIR" ]] || {
+  echo "rd-remove: path is not a valid branch worktree: $WORKTREE" >&2
+  exit 1
+}
+
+if [[ -n "$(git -C "$WORKTREE" status --porcelain)" ]]; then
+  echo "rd-remove: worktree has uncommitted changes: $WORKTREE" >&2
+  exit 1
+fi
+
+git --git-dir="$COMMON_DIR" worktree remove "$WORKTREE"
+echo "Removed worktree $WORKTREE (branch '$BRANCH' preserved)."
+
+if [[ "$DELETE_BRANCH" -eq 1 ]]; then
+  git --git-dir="$COMMON_DIR" branch -d "$BRANCH"
+  echo "Deleted merged branch '$BRANCH'."
+fi

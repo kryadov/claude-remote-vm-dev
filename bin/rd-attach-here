@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Attach to the Claude tmux session associated with the current project worktree.
+set -euo pipefail
+
+CURRENT_DIR="$(pwd -P)"
+fmt=$'#{session_name}\t#{@rd_project}\t#{@rd_session}\t#{@rd_worktree}'
+rows="$(tmux list-sessions -F "$fmt" 2>/dev/null || true)"
+
+while IFS=$'\t' read -r name _project _rd_session worktree; do
+  [[ "$name" == claude-* && -n "$worktree" && -d "$worktree" ]] || continue
+  canonical="$(cd "$worktree" && pwd -P)"
+  if [[ "$CURRENT_DIR" == "$canonical" || "$CURRENT_DIR" == "$canonical/"* ]]; then
+    exec tmux attach -t "=$name"
+  fi
+done <<< "$rows"
+
+echo "rd-attach-here: no running Claude session matches $CURRENT_DIR" >&2
+echo "Start one with rd-start, then reopen the folder or run the VS Code task again." >&2
+exit 1

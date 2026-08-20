@@ -1,0 +1,18 @@
+[Unit]
+Description=Persistent tmux server for Claude Code sessions
+After=default.target
+
+[Service]
+# Keeps a tmux server alive without a logged-in user (paired with `loginctl
+# enable-linger`), so the server comes back after a reboot with nobody logged
+# in. Sessions live in tmux's memory: they survive a disconnect, but NOT a
+# reboot — after one, only this "main" session is left and the rd-* helpers
+# restart the others from their worktrees. Verified on a real VM.
+Type=forking
+ExecStart=/usr/bin/tmux new-session -d -s main
+ExecStop=/usr/bin/tmux kill-server
+Restart=on-failure
+KillMode=none
+
+[Install]
+WantedBy=default.target

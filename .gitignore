@@ -1,0 +1,12 @@
+# Environment-specific config and secrets — never commit.
+rd.env
+*.pem
+*.key
+*.token
+.token.tmp
+
+# Local Claude Code / editor state
+.claude/
+
+# IDE
+.idea/

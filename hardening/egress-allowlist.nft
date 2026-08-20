@@ -1,0 +1,52 @@
+#!/usr/sbin/nft -f
+#
+# DEFERRED / OPTIONAL egress allowlist. This is the recommended hardening step
+# AFTER the base setup works. Test carefully before enabling on boot — a wrong
+# rule can cut off Vertex or apt and hang your sessions.
+#
+# Note on domains: nftables matches IPs, not hostnames. Domain-based egress is
+# therefore approximate. Two paths:
+#   (a) resolve the FQDNs you need into the `allow4`/`allow6` sets below and keep
+#       them updated (fragile for large CDNs like Google); or
+#   (b) front all egress with an HTTP(S) proxy that enforces the domain allowlist
+#       and only allow egress to the proxy here (more robust).
+# This file implements path (a) as a starting template.
+#
+# Apply (test):   sudo nft -f egress-allowlist.nft
+# Persist:        copy to /etc/nftables.conf and `sudo systemctl enable --now nftables`
+
+flush ruleset
+
+table inet filter {
+    set allow4 {
+        type ipv4_addr
+        flags interval
+        # Populate with resolved ranges for the domains you need. Examples only —
+        # verify current ranges for your region before relying on them:
+        # elements = { 142.250.0.0/15, 172.217.0.0/16, 216.58.192.0/19 }
+    }
+
+    set allow6 {
+        type ipv6_addr
+        flags interval
+        # elements = { 2607:f8b0::/32 }
+    }
+
+    chain output {
+        type filter hook output priority 0; policy drop;
+
+        oif "lo" accept
+        ct state established,related accept
+        meta l4proto { icmp, ipv6-icmp } accept
+
+        # DNS (needed to resolve everything else)
+        udp dport 53 accept
+        tcp dport 53 accept
+
+        ip  daddr @allow4 accept
+        ip6 daddr @allow6 accept
+
+        # Log what gets dropped so you can tune the allow sets, then drop.
+        counter log prefix "egress-drop " drop
+    }
+}

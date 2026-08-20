@@ -202,6 +202,19 @@ Forge step:
 - GitHub: `gh auth login --hostname <host>`, then `gh auth setup-git
   --hostname <host>`, which writes its own host-scoped helper.
 
+Two details the live GitLab run forced, both now covered by tests:
+
+- **Check the login scoped, and without a pipeline.** `glab auth status` exits
+  non-zero when *any* configured instance fails — a stale `gitlab.com` entry is
+  enough — so `glab auth status | grep -q "$host"` under `set -o pipefail`
+  reports "not logged in" for a host that is perfectly fine, and re-runs the
+  login. Use `glab auth status --hostname "$host"`, mirroring the `gh` branch.
+- **Follow `REPO_URL`'s scheme.** Git matches a credential helper by scheme as
+  well as host, so an `https://`-scoped helper is never consulted for an
+  `http://` remote and the clone dies asking for a username. `https` stays the
+  default; an `http://` `REPO_URL` switches both the helper scope and the
+  token-creation URL printed to the user.
+
 The credential helper must be host-scoped, not global:
 
 ```sh

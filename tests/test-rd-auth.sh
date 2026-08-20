@@ -17,8 +17,16 @@ cat > "$TEST_ROOT/bin/glab" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$HOME/glab-log"
 if [[ "$1 $2" == "auth status" ]]; then
+  # Mirrors the real CLI: a scoped check succeeds, while the unscoped one
+  # still prints every host but exits non-zero when ANY configured instance
+  # fails to authenticate — a stale gitlab.com entry is enough.
+  if [[ "$*" == *--hostname* ]]; then
+    echo "gitlab.example.com"
+    exit 0
+  fi
   echo "gitlab.example.com"
-  exit 0
+  echo "gitlab.com: API call failed: 401 Unauthorized"
+  exit 1
 fi
 exit 1
 EOF
@@ -237,6 +245,37 @@ test_gitlab_credential_helper_is_host_scoped() {
   [[ -z "$(git_value "$home" credential.helper)" ]]
 }
 
+# An unrelated broken host (a stale gitlab.com entry is the common case) makes
+# `glab auth status` exit non-zero. Under `set -o pipefail` that used to send
+# rd-auth down the login path even though the target host was authenticated —
+# an interactive re-prompt at best, a hard failure in a non-interactive run.
+test_existing_gitlab_login_is_detected_despite_another_broken_host() {
+  local home
+  home="$(auth_home already vertex)"
+
+  run_auth "$home" >/dev/null
+
+  grep -q -- "auth status --hostname gitlab.example.com" "$home/glab-log"
+  ! grep -q -- "auth login" "$home/glab-log"
+}
+
+# Git matches a helper by scheme as well as host, so an https-scoped helper is
+# never consulted for an http:// remote — the clone then dies asking for a
+# username. Follow REPO_URL's scheme instead of assuming https.
+test_http_forge_host_gets_an_http_scoped_helper() {
+  local home
+  home="$(auth_home httpforge vertex \
+    'REPO_URL="http://gitlab.internal:8929/example/remote-dev.git"' \
+    'GIT_USER_NAME="Example Developer"' \
+    'GIT_USER_EMAIL="developer@example.com"')"
+
+  run_auth "$home" >/dev/null
+
+  [[ "$(git_value "$home" 'credential.http://gitlab.internal:8929.helper')" \
+     == '!glab auth git-credential' ]]
+  [[ -z "$(git_value "$home" 'credential.https://gitlab.internal:8929.helper')" ]]
+}
+
 test_github_remote_uses_gh() {
   local home
   home="$(auth_home github vertex \
@@ -316,6 +355,8 @@ test_anthropic_subscription_writes_oauth_token
 test_anthropic_api_key_needs_no_login
 test_provider_flag_overrides_the_default
 test_gitlab_credential_helper_is_host_scoped
+test_existing_gitlab_login_is_detected_despite_another_broken_host
+test_http_forge_host_gets_an_http_scoped_helper
 test_github_remote_uses_gh
 test_github_dot_com_is_detected_without_forge_key
 test_forge_flag_overrides_detection

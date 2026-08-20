@@ -179,6 +179,19 @@ There is no compiler; validation is static + a live smoke test on a VM.
 
 ## Things that go wrong
 
+- **`gh` assumes one checkout per repository, and this repo is built on
+  worktrees.** `gh pr close <n> --delete-branch` tries to switch the local
+  checkout to the base branch first, which fails when another worktree holds it:
+  `fatal: 'master' is already used by worktree at ~/projects/<project>`. The PR
+  still closes, but the branch survives on the remote. Delete it explicitly —
+  `git push origin --delete <branch>` — then clean up locally with `rd-remove`.
+  Expect the same class of failure from any `gh` subcommand that checks out a
+  branch (`gh pr checkout`, `gh pr merge --delete-branch`).
+- **`rd-remove --delete-branch` refuses unmerged branches, by design.** It uses
+  `git branch -d`, so after a *closed* (not merged) PR the branch stays and git
+  prints its own "not fully merged" error next to rd-remove's "branch preserved"
+  line. That pair reads like a contradiction but is correct; force it yourself
+  with `git branch -D` if you really mean it.
 - `systemctl --user` needs a running user manager; `bootstrap.sh` calls
   `loginctl enable-linger` first so the service persists without a login. If the
   service fails to start, re-login and re-run the enable step.

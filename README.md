@@ -14,6 +14,76 @@ See the full design in
 and the multi-provider / multi-forge extension in
 [`docs/superpowers/specs/2026-08-15-github-and-multi-provider-design.md`](docs/superpowers/specs/2026-08-15-github-and-multi-provider-design.md).
 
+## Daily use
+
+The quickest way in is the interactive picker — run it on the VM:
+
+```bash
+rd-tui
+```
+
+![rd-tui: interactive session picker](docs/assets/rd-tui-demo.gif)
+
+It lists every session, running and stopped, and drives the other helpers:
+
+| key | action |
+| --- | --- |
+| `↑` `↓` (or `k` `j`) | move |
+| `enter` | attach; a stopped session is started first |
+| `s` | stop (keeps the worktree and branch) |
+| `x` | remove a stopped session's worktree |
+| `n` | new session: pick a project, name it, pick feature/bugfix |
+| `r` / `q` | refresh / quit |
+
+Attaching replaces `rd-tui` with tmux, so `Ctrl-b` `d` returns you to the shell.
+From the laptop, `./connect.sh --tui` (`.\connect.ps1 -Tui`, `connect.bat -Tui`)
+opens it straight over SSH.
+
+The same operations are available as plain commands:
+
+```bash
+rd-start backend                         # default session in ~/projects/backend
+rd-start backend --session new-search    # feature/new-search in its own worktree
+rd-start backend --session login-timeout --type bugfix
+rd-start backend --session experiment --base origin/main
+rd-start backend --session bedrock-try --provider bedrock   # override the default provider
+
+rd-attach backend --session login-timeout    # detach: Ctrl-b then d
+rd-stop backend --session login-timeout      # keep the worktree and branch
+rd-remove backend --session login-timeout    # remove a clean, stopped worktree
+rd-remove backend --session old-fix --delete-branch
+rd-list                                    # running sessions
+rd-list --all                              # also stopped worktree sessions
+rd-list --porcelain --all                  # tab-separated, for scripts
+```
+
+Named worktrees live at `~/worktrees/<project>/<session>`. Their default branch
+is `feature/<session>`; use `--type bugfix` for `bugfix/<session>`, `--branch`
+for an explicit `feature/...` or `bugfix/...` name, and `--base` to override the
+starting `HEAD`. Restarting an existing session reuses its worktree and branch,
+so `--type` is only needed when it is first created. Project and session names
+may contain letters, digits, `_`, and `-`. Tmux metadata prevents ambiguous
+legacy names from being attached or stopped as the wrong session.
+
+To clone and start in one command, run `rd-start backend <git-url> --session
+new-search`. The laptop helpers can also start and attach directly:
+
+```bash
+./connect.sh backend --session new-search
+# Windows PowerShell/cmd:
+.\connect.ps1 backend -Session new-search -Type feature
+connect.bat backend -Session new-search -Type feature
+```
+
+List sessions from the laptop without attaching:
+```bash
+./sessions.sh                      # Windows: sessions.bat  or  .\sessions.ps1
+```
+
+Typical loop: start a session, give Claude a task, **close your laptop**. Later,
+reconnect (VS Code Remote-SSH for diffs, `rd-attach` for questions), review the
+branch Claude committed to, and open a merge request.
+
 ## How it works
 
 - **tmux** hosts each Claude Code session on the VM. A project can have a
@@ -93,74 +163,6 @@ unaffected by the laptop OS.
    subscription runs `claude setup-token` and stores the token in
    `~/.config/rd/providers/anthropic.env` (mode 0600). For Jira, start `claude`
    once and trigger a Jira action to complete its OAuth.
-
-## Daily use
-
-The quickest way in is the interactive picker — run it on the VM:
-
-```bash
-rd-tui
-```
-
-It lists every session, running and stopped, and drives the other helpers:
-
-| key | action |
-| --- | --- |
-| `↑` `↓` (or `k` `j`) | move |
-| `enter` | attach; a stopped session is started first |
-| `s` | stop (keeps the worktree and branch) |
-| `x` | remove a stopped session's worktree |
-| `n` | new session: pick a project, name it, pick feature/bugfix |
-| `r` / `q` | refresh / quit |
-
-Attaching replaces `rd-tui` with tmux, so `Ctrl-b` `d` returns you to the shell.
-From the laptop, `./connect.sh --tui` (`.\connect.ps1 -Tui`, `connect.bat -Tui`)
-opens it straight over SSH.
-
-The same operations are available as plain commands:
-
-```bash
-rd-start backend                         # default session in ~/projects/backend
-rd-start backend --session new-search    # feature/new-search in its own worktree
-rd-start backend --session login-timeout --type bugfix
-rd-start backend --session experiment --base origin/main
-rd-start backend --session bedrock-try --provider bedrock   # override the default provider
-
-rd-attach backend --session login-timeout    # detach: Ctrl-b then d
-rd-stop backend --session login-timeout      # keep the worktree and branch
-rd-remove backend --session login-timeout    # remove a clean, stopped worktree
-rd-remove backend --session old-fix --delete-branch
-rd-list                                    # running sessions
-rd-list --all                              # also stopped worktree sessions
-rd-list --porcelain --all                  # tab-separated, for scripts
-```
-
-Named worktrees live at `~/worktrees/<project>/<session>`. Their default branch
-is `feature/<session>`; use `--type bugfix` for `bugfix/<session>`, `--branch`
-for an explicit `feature/...` or `bugfix/...` name, and `--base` to override the
-starting `HEAD`. Restarting an existing session reuses its worktree and branch,
-so `--type` is only needed when it is first created. Project and session names
-may contain letters, digits, `_`, and `-`. Tmux metadata prevents ambiguous
-legacy names from being attached or stopped as the wrong session.
-
-To clone and start in one command, run `rd-start backend <git-url> --session
-new-search`. The laptop helpers can also start and attach directly:
-
-```bash
-./connect.sh backend --session new-search
-# Windows PowerShell/cmd:
-.\connect.ps1 backend -Session new-search -Type feature
-connect.bat backend -Session new-search -Type feature
-```
-
-List sessions from the laptop without attaching:
-```bash
-./sessions.sh                      # Windows: sessions.bat  or  .\sessions.ps1
-```
-
-Typical loop: start a session, give Claude a task, **close your laptop**. Later,
-reconnect (VS Code Remote-SSH for diffs, `rd-attach` for questions), review the
-branch Claude committed to, and open a merge request.
 
 ## Model providers
 

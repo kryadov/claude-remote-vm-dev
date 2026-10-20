@@ -85,7 +85,9 @@ case "$state" in
         echo "rd-restart: Claude in $PROJECT/$RD_SESSION is busy$age (a turn is in progress)." >&2
         echo "            An interrupted turn (Esc) also stays 'busy' until the next prompt finishes." >&2
       else
-        echo "rd-restart: Claude's state in $PROJECT/$RD_SESSION is unknown (session started before rd-restart existed)." >&2
+        echo "rd-restart: Claude's state in $PROJECT/$RD_SESSION is unknown: no hook has reported yet." >&2
+        echo "            Claude may still be on a first-run or login screen, or the session" >&2
+        echo "            was started before rd-restart existed." >&2
       fi
       echo "            Attach and check, then re-run with --force." >&2
       exit 3
@@ -93,22 +95,27 @@ case "$state" in
     ;;
 esac
 
-# --resume needs the transcript to exist; a legacy session has no recorded id,
-# and --continue (latest conversation in this worktree) is the best guess.
-session_id="$(tmux_option @rd_claude_session)"
-resume=()
-if [[ -z "$session_id" ]]; then
-  resume=(--continue)
-elif [[ "$session_id" =~ ^[A-Za-z0-9-]+$ ]] &&
-     compgen -G "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/*/$session_id.jsonl" >/dev/null; then
-  resume=(--resume "$session_id")
-else
-  echo "rd-restart: warning: conversation $session_id has no transcript; starting a new one." >&2
-fi
-
 worktree="$(tmux_option @rd_worktree)"
 if [[ -z "$worktree" || ! -d "$worktree" ]]; then
   worktree="$(tmux display-message -t "=$TARGET:" -p '#{pane_current_path}' 2>/dev/null || true)"
+fi
+
+# --resume needs the transcript to exist. A legacy session has no recorded id:
+# --continue (latest conversation in this worktree) is the best guess, but only
+# if there is one — otherwise Claude prints "No conversation found" and exits.
+# Claude keeps a worktree's transcripts in projects/<path, non-alnum -> '-'>.
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+session_id="$(tmux_option @rd_claude_session)"
+resume=()
+if [[ -z "$session_id" ]]; then
+  if [[ -n "$worktree" ]] && compgen -G "$CLAUDE_DIR/projects/${worktree//[^A-Za-z0-9]/-}/*.jsonl" >/dev/null; then
+    resume=(--continue)
+  fi
+elif [[ "$session_id" =~ ^[A-Za-z0-9-]+$ ]] &&
+     compgen -G "$CLAUDE_DIR/projects/*/$session_id.jsonl" >/dev/null; then
+  resume=(--resume "$session_id")
+else
+  echo "rd-restart: warning: conversation $session_id has no transcript; starting a new one." >&2
 fi
 
 # respawn-pane keeps the pane id and the session environment, so a provider

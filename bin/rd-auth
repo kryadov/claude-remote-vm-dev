@@ -143,6 +143,11 @@ case "$PROVIDER" in
         echo "rd-auth: that does not look like a Claude token (expected sk-ant-…); nothing stored" >&2
         exit 1
       fi
+      # The prompt is hidden, so a paste that seemed to do nothing gets pasted
+      # again — keep only the first token.
+      rest="${token#sk-ant-}"
+      token="sk-ant-${rest%%sk-ant-*}"
+      echo "   received ${token:0:14}… (${#token} chars)"
       mkdir -p "$PROVIDER_DIR"
       umask 077
       printf 'export CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$token" >> "$PROVIDER_FILE"
@@ -157,6 +162,26 @@ case "$PROVIDER" in
 esac
 
 # --- 2/3  Forge + Git author --------------------------------------------------
+
+# First-run onboarding (theme, then a login-method picker) ignores the
+# credentials above and would block every new session until someone attaches
+# and answers it; picking "subscription" there starts a second OAuth login.
+claude_json="$HOME/.claude.json"
+if command -v jq >/dev/null 2>&1; then
+  [[ -s "$claude_json" ]] || printf '{}\n' > "$claude_json"
+  if [[ "$(jq -r '.hasCompletedOnboarding // false' "$claude_json" 2>/dev/null)" != "true" ]]; then
+    tmp="$(mktemp "$claude_json.XXXXXX")"
+    if jq '.hasCompletedOnboarding = true' "$claude_json" > "$tmp"; then
+      chmod 600 "$tmp"
+      mv -f "$tmp" "$claude_json"
+      echo "   Claude first-run onboarding marked done (credentials come from the provider) ✓"
+    else
+      rm -f "$tmp"
+    fi
+  fi
+else
+  echo "   [warn] jq missing: new sessions will show Claude's first-run onboarding once" >&2
+fi
 
 echo "== 2/3  Forge login + Git author =="
 if [[ -z "$FORGE_HOST" ]]; then

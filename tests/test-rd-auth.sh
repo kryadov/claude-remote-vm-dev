@@ -214,6 +214,38 @@ test_anthropic_subscription_writes_oauth_token() {
   [[ "$mode" == "600" ]]
 }
 
+# The prompt is hidden, so users paste again when nothing seems to happen.
+test_anthropic_subscription_keeps_one_token_from_a_repeated_paste() {
+  local home output
+  home="$(auth_home repaste anthropic)"
+  printf '# anthropic\n' > "$home/.config/rd/providers/anthropic.env"
+
+  output="$(run_auth "$home" <<< "sk-ant-oat01-EXAMPLEsk-ant-oat01-EXAMPLEsk-ant-oat01-EXA")"
+  grep -qx 'export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-EXAMPLE' \
+    "$home/.config/rd/providers/anthropic.env"
+  [[ "$output" == *"received sk-ant-oat01-E… (20 chars)"* ]]
+  [[ "$output" != *"sk-ant-oat01-EXAMPLE"* ]] || {
+    echo "rd-auth echoed the token back" >&2
+    return 1
+  }
+}
+
+# First-run onboarding would otherwise stop every new session on a login
+# picker that ignores the provider's credentials.
+test_onboarding_is_marked_done() {
+  local home
+  command -v jq >/dev/null 2>&1 || { echo "  (skipped: no jq)"; return 0; }
+  home="$(auth_home onboarding anthropic)"
+  printf 'export ANTHROPIC_API_KEY=sk-ant-EXAMPLE\n' \
+    > "$home/.config/rd/providers/anthropic.env"
+  printf '{"userID": "x"}\n' > "$home/.claude.json"
+
+  run_auth "$home" >/dev/null
+
+  [[ "$(jq -r .hasCompletedOnboarding "$home/.claude.json")" == "true" ]]
+  [[ "$(jq -r .userID "$home/.claude.json")" == "x" ]]
+}
+
 test_anthropic_subscription_rejects_a_bad_paste() {
   local home
   home="$(auth_home badpaste anthropic)"
@@ -372,6 +404,8 @@ test_bedrock_sso_login
 test_bedrock_static_credential_needs_no_login
 test_bedrock_without_any_credential_fails
 test_anthropic_subscription_writes_oauth_token
+test_anthropic_subscription_keeps_one_token_from_a_repeated_paste
+test_onboarding_is_marked_done
 test_anthropic_subscription_rejects_a_bad_paste
 test_anthropic_api_key_needs_no_login
 test_provider_flag_overrides_the_default

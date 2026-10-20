@@ -36,6 +36,7 @@ cat > "$tmp" <<EOF
     "SessionStart": $(hook session-start),
     "UserPromptSubmit": $(hook prompt),
     "Stop": $(hook stop),
+    "StopFailure": $(hook stop),
     "SessionEnd": $(hook session-end)
   }
 }
@@ -48,4 +49,7 @@ if [[ -n "${TMUX_PANE:-}" ]]; then
   tmux set-option -t "$TMUX_PANE" @rd_claude_pane "$TMUX_PANE" 2>/dev/null || true
 fi
 
+# Claude's own updater cannot write the root-owned npm prefix and only shows
+# "Auto-update failed" in the footer; rd-update owns updates.
+export DISABLE_AUTOUPDATER=1
 exec claude --dangerously-skip-permissions --settings "$SETTINGS" "$@"

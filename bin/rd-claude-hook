@@ -5,6 +5,9 @@
 #
 #   rd-claude-hook session-start|prompt|stop|session-end   (hook JSON on stdin)
 #
+# `stop` also serves StopFailure: a turn that ended on an API error is over,
+# and leaving the state 'busy' would make rd-restart refuse for no reason.
+#
 # Installed by rd-claude through `claude --settings`, never globally. It prints
 # nothing — SessionStart/UserPromptSubmit hook output is injected into Claude's
 # context — and always exits 0, so a failure here can never block Claude.

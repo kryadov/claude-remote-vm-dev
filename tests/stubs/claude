@@ -6,7 +6,10 @@
 # call is appended to $CLAUDE_STUB_DIR/log.
 set -euo pipefail
 dir="${CLAUDE_STUB_DIR:-}"
-[[ -n "$dir" ]] && printf '%s\n' "$*" >> "$dir/log"
+if [[ -n "$dir" ]]; then
+  printf '%s\n' "$*" >> "$dir/log"
+  printf 'DISABLE_AUTOUPDATER=%s\n' "${DISABLE_AUTOUPDATER:-}" > "$dir/env"
+fi
 case "${1:-}" in
   --version)
     [[ -n "$dir" && -f "$dir/version" ]] || exit 1

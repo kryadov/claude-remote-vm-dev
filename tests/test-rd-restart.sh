@@ -125,6 +125,8 @@ test_rd_claude_launches_with_hooks_and_records_version() {
   [[ "$(claude_log)" == *"--dangerously-skip-permissions --settings $settings --continue"* ]]
   [[ "$(option rd_claude_version)" == "2.1.1" ]]
   [[ "$(option rd_claude_pane)" == "=claude-demo:" ]]
+  # Its own updater cannot write the npm prefix; rd-update owns updates.
+  [[ "$(cat "$HOME_DIR/claude-stub/env")" == "DISABLE_AUTOUPDATER=1" ]]
 }
 
 test_rd_start_launches_through_rd_claude() {
@@ -167,10 +169,36 @@ test_restart_resumes_the_recorded_conversation() {
 }
 
 test_restart_force_on_legacy_session_continues() {
+  local worktree
   setup_case legacy
   rd rd-start demo >/dev/null
+  # Claude files a worktree's transcripts under its path with non-alnum -> '-'.
+  worktree="$(option rd_worktree)"
+  mkdir -p "$HOME_DIR/.claude/projects/${worktree//[^A-Za-z0-9]/-}"
+  : > "$HOME_DIR/.claude/projects/${worktree//[^A-Za-z0-9]/-}/old.jsonl"
   rd rd-restart demo --force >/dev/null
   [[ "$(last_send_keys)" == *"/bin/rd-claude --continue C-m" ]]
+}
+
+# --continue with nothing to continue makes Claude print "No conversation
+# found" and exit, leaving the session at a bare shell.
+test_restart_legacy_without_conversations_starts_fresh() {
+  setup_case legacy-empty
+  rd rd-start demo >/dev/null
+  rd rd-restart demo --force >/dev/null
+  [[ "$(last_send_keys)" == *"/bin/rd-claude C-m" ]]
+}
+
+test_stop_failure_ends_the_turn() {
+  local settings
+  setup_case stop-failure
+  rd rd-start demo >/dev/null
+  TMUX_PANE="=claude-demo:" rd rd-claude
+  settings="$HOME_DIR/.config/rd/claude-settings.json"
+  grep -q '"StopFailure": .*rd-claude-hook stop' "$settings"
+  hook prompt
+  hook stop
+  [[ "$(option rd_claude_state)" == "idle" ]]
 }
 
 test_restart_without_transcript_starts_fresh() {
@@ -281,6 +309,8 @@ test_restart_refuses_unknown_state_with_exit_3
 test_restart_refuses_busy_session
 test_restart_resumes_the_recorded_conversation
 test_restart_force_on_legacy_session_continues
+test_restart_legacy_without_conversations_starts_fresh
+test_stop_failure_ends_the_turn
 test_restart_without_transcript_starts_fresh
 test_restart_rejects_stopped_session
 test_restart_named_session_checks_metadata

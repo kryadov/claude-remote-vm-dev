@@ -16,6 +16,15 @@ SMOKE=/tmp/crd-smoke
 rm -rf "$SMOKE"
 mkdir -p "$SMOKE"
 
+# On a provisioned VM this runs from a login shell that already exports the
+# VM's provider. The private tmux server would inherit it, and ~/.profile
+# honours an inherited RD_PROVIDER — so start from a provider-free env.
+unset RD_PROVIDER CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_BEDROCK \
+  ANTHROPIC_VERTEX_PROJECT_ID CLOUD_ML_REGION ANTHROPIC_API_KEY \
+  CLAUDE_CODE_OAUTH_TOKEN AWS_REGION AWS_PROFILE AWS_BEARER_TOKEN_BEDROCK \
+  AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+  ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL
+
 export HOME="$SMOKE/home"
 export TMUX_TMPDIR="$SMOKE/tmux"          # private tmux server
 mkdir -p "$HOME/projects" "$HOME/.config/rd/providers" "$HOME/.local/bin" "$TMUX_TMPDIR"

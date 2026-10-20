@@ -28,11 +28,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# \x1f, not a tab: `read` collapses runs of whitespace separators, which would
-# shift every column after an empty field (a legacy session has no provider).
+# Rows are split on \x1f, not a tab: `read` collapses runs of whitespace
+# separators, which would shift every column after an empty field (a legacy
+# session has no provider). tmux itself must still emit tabs — it escapes
+# control characters such as \x1f to a literal "\037" in format output.
 US=$'\x1f'
-fmt="#{session_name}${US}#{@rd_project}${US}#{@rd_session}${US}#{session_created}${US}#{?session_attached,attached,detached}${US}#{pane_current_path}${US}#{@rd_provider}${US}#{@rd_claude_state}${US}#{@rd_claude_version}"
+fmt=$'#{session_name}\t#{@rd_project}\t#{@rd_session}\t#{session_created}\t#{?session_attached,attached,detached}\t#{pane_current_path}\t#{@rd_provider}\t#{@rd_claude_state}\t#{@rd_claude_version}'
 running="$(tmux list-sessions -F "$fmt" 2>/dev/null | grep -E '^claude-' || true)"
+running="${running//$'\t'/$US}"
 installed="$(claude --version 2>/dev/null | awk 'NR == 1 { print $1 }' || true)"
 
 rows=()

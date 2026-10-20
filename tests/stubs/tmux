@@ -73,11 +73,15 @@ case "$command" in
       echo "tmux format contains a literal backslash-t" >&2
       exit 2
     fi
-    # Render whatever fields the caller asked for, split on the caller's own
-    # separator (a tab, or \x1f when empty fields must survive `read`).
+    # Render whatever fields the caller asked for. Like real tmux, a control
+    # character in the format comes back escaped ("\037" for \x1f), so a
+    # caller that splits on one gets a single unsplittable column.
+    if [[ "$format" == *$'\x1f'* ]]; then
+      printf '%s\n' "${format//$'\x1f'/\\037}"
+      exit 0
+    fi
+    IFS=$'\t' read -r -a fields <<< "$format"
     sep=$'\t'
-    [[ "$format" == *$'\x1f'* ]] && sep=$'\x1f'
-    IFS="$sep" read -r -a fields <<< "$format"
     while IFS=$'\t' read -r name created state path; do
       [[ -n "$name" ]] || continue
       row=""

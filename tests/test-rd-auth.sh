@@ -51,6 +51,7 @@ cat > "$TEST_ROOT/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$HOME/claude-log"
 [[ "$1" == "setup-token" ]] || exit 1
+echo "Visit https://claude.example/oauth to authorize"
 echo "sk-ant-oat01-EXAMPLE"
 EOF
 
@@ -197,13 +198,32 @@ test_anthropic_subscription_writes_oauth_token() {
   home="$(auth_home anthropic anthropic)"
   printf '# anthropic\n' > "$home/.config/rd/providers/anthropic.env"
 
-  run_auth "$home" >/dev/null
+  local output
+  # The token is pasted back after setup-token, which must own the terminal.
+  output="$(run_auth "$home" <<< "sk-ant-oat01-EXAMPLE")"
 
   grep -q "setup-token" "$home/claude-log"
+  # setup-token's own output (URL, code prompt) must reach the user, not a pipe.
+  [[ "$output" == *"Visit https://claude.example/oauth"* ]] || {
+    echo "setup-token output was swallowed: $output" >&2
+    return 1
+  }
   grep -q 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-EXAMPLE' \
     "$home/.config/rd/providers/anthropic.env"
   mode="$(stat -c '%a' "$home/.config/rd/providers/anthropic.env")"
   [[ "$mode" == "600" ]]
+}
+
+test_anthropic_subscription_rejects_a_bad_paste() {
+  local home
+  home="$(auth_home badpaste anthropic)"
+  printf '# anthropic\n' > "$home/.config/rd/providers/anthropic.env"
+
+  if run_auth "$home" <<< "not-a-token" >/dev/null 2>&1; then
+    echo "rd-auth stored something that is not a Claude token" >&2
+    return 1
+  fi
+  ! grep -q CLAUDE_CODE_OAUTH_TOKEN "$home/.config/rd/providers/anthropic.env"
 }
 
 test_anthropic_api_key_needs_no_login() {
@@ -352,6 +372,7 @@ test_bedrock_sso_login
 test_bedrock_static_credential_needs_no_login
 test_bedrock_without_any_credential_fails
 test_anthropic_subscription_writes_oauth_token
+test_anthropic_subscription_rejects_a_bad_paste
 test_anthropic_api_key_needs_no_login
 test_provider_flag_overrides_the_default
 test_gitlab_credential_helper_is_host_scoped

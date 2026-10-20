@@ -127,10 +127,20 @@ case "$PROVIDER" in
     if provider_has ANTHROPIC_API_KEY || provider_has CLAUDE_CODE_OAUTH_TOKEN; then
       echo "   Anthropic credential already present in $PROVIDER_FILE ✓"
     else
-      echo "   Subscription login — authorize the URL, then the token is stored for you."
-      token="$(claude setup-token | tail -1 | tr -d '[:space:]')"
-      if [[ -z "$token" ]]; then
-        echo "rd-auth: 'claude setup-token' returned no token" >&2
+      echo "   Subscription login — open the URL claude prints, authorize, paste the code back."
+      # setup-token is an interactive TUI: it must own the terminal. Piping its
+      # stdout (to grab the token) hides the URL and the code prompt, and the
+      # login hangs with nothing on screen. So it runs as-is, and the token it
+      # prints is pasted back here — hidden, never in a log or an argument.
+      claude setup-token || {
+        echo "rd-auth: 'claude setup-token' failed" >&2
+        exit 1
+      }
+      read -rsp "   Paste the token it printed (sk-ant-…): " token || true
+      echo
+      token="$(printf '%s' "${token:-}" | tr -d '[:space:]')"
+      if [[ "$token" != sk-ant-* ]]; then
+        echo "rd-auth: that does not look like a Claude token (expected sk-ant-…); nothing stored" >&2
         exit 1
       fi
       mkdir -p "$PROVIDER_DIR"

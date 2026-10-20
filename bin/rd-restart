@@ -132,5 +132,8 @@ tmux set-option -t "=$TARGET:" @rd_claude_state ""
 printf -v launch '%q ' "$RD_BIN/rd-claude" ${resume[@]+"${resume[@]}"}
 tmux send-keys -t "$pane" "${launch% }" C-m
 
+# rd-claude records the version once the new Claude is up; set it now too, so
+# a listing taken right after this (rd-tui refreshes at once) is not stale.
 version="$(claude --version 2>/dev/null | awk 'NR == 1 { print $1 }' || true)"
+tmux set-option -t "=$TARGET:" @rd_claude_version "$version"
 echo "Restarted $PROJECT/$RD_SESSION on Claude ${version:-<unknown>} (${resume[*]:-new conversation})."

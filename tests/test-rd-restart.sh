@@ -267,6 +267,8 @@ test_restart_update_installs_before_restarting() {
   rd rd-restart demo --update >/dev/null
   [[ "$(cat "$HOME_DIR/claude-stub/version")" == "2.1.2" ]]
   [[ "$(last_send_keys)" == *"--resume $ID C-m" ]]
+  # Not left 'outdated' for a listing taken before the new Claude reports in.
+  [[ "$(option rd_claude_version)" == "2.1.2" ]]
 }
 
 test_rd_list_reports_activity_version_and_outdated() {

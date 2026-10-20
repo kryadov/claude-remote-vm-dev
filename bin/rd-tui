@@ -5,7 +5,8 @@
 #
 # Arrow keys (or j/k) move, enter attaches (starting a stopped session first),
 # s stops, u restarts on the latest Claude (resuming the conversation), x
-# removes a stopped session's worktree, n walks through creating a new one, r
+# removes a stopped session's worktree, n walks through creating a new one, c
+# clones a project from a git URL and starts a session in it, r
 # refreshes, q quits. Attaching replaces this process with tmux, so
 # detaching with Ctrl-b d drops you back to the shell.
 #
@@ -192,7 +193,7 @@ render_list() {
     "$BOLD" "$RESET" "$DIM" "$(hostname 2>/dev/null || echo VM)" "$RESET"
 
   if (( ${#STATES[@]} == 0 )); then
-    printf '  No sessions yet — press n to start one.\n'
+    printf '  No sessions yet — press n to start one, or c to clone a project.\n'
   else
     pw="$(column_width PROJECT 24 "${PROJECTS[@]}")"
     sw="$(column_width SESSION 20 "${SESSIONS[@]}")"
@@ -215,7 +216,7 @@ render_list() {
     done
   fi
 
-  printf '\n  %sarrows move   enter attach   s stop   u update   x remove   n new   r refresh   q quit%s\n' \
+  printf '\n  %sarrows move   enter attach   s stop   u update   x remove   n new   c clone   r refresh   q quit%s\n' \
     "$DIM" "$RESET"
   if [[ " ${VERSIONS[*]-} " == *"* "* ]]; then
     printf '  %s* runs an older Claude than the installed one — u restarts it on the latest%s\n' \
@@ -401,20 +402,67 @@ action_remove() {
   return 0
 }
 
+CLONE_ITEM="+ clone from URL…"
+
 action_new() {
-  local project session args=()
   local projects=()
   mapfile -t projects < <(list_projects)
-  if (( ${#projects[@]} == 0 )); then
-    MESSAGE="No projects in ~/projects — clone one with: rd-start <project> <git-url>"
-    return 0
-  fi
 
-  if ! choose_from "New session — pick a project" "${projects[@]}"; then
+  if ! choose_from "New session — pick a project" "$CLONE_ITEM" ${projects[@]+"${projects[@]}"}; then
     MESSAGE="Cancelled."
     return 0
   fi
-  project="$CHOICE"
+  if [[ "$CHOICE" == "$CLONE_ITEM" ]]; then
+    action_clone
+    return 0
+  fi
+  new_session_in "$CHOICE"
+}
+
+# A suggested project name from a git URL: the repository's last path
+# component without .git, reduced to the characters rd-start accepts.
+project_from_url() {
+  local name="${1%/}"
+  name="${name##*/}"
+  name="${name##*:}"
+  name="${name%.git}"
+  name="${name//[^A-Za-z0-9_-]/-}"
+  name="${name#[-_]}"
+  printf '%s' "$name"
+}
+
+# Asks for a URL and a project name; rd-start does the clone (and skips it if
+# the project is already there), validates the name, and starts the session.
+action_clone() {
+  local url project suggested
+  clear_screen
+  printf '%sClone a project%s\n\n' "$BOLD" "$RESET"
+  if ! prompt_line '  Git URL (https://… or git@…): ' || [[ -z "$ANSWER" ]]; then
+    MESSAGE="Cancelled."
+    return 0
+  fi
+  url="$ANSWER"
+  if [[ "$url" != *://* && "$url" != git@* ]]; then
+    MESSAGE="Not a git URL: $url"
+    return 0
+  fi
+  suggested="$(project_from_url "$url")"
+  if ! prompt_line "  Project name (enter for ${suggested:-?}): "; then
+    MESSAGE="Cancelled."
+    return 0
+  fi
+  project="${ANSWER:-$suggested}"
+  if [[ -z "$project" ]]; then
+    MESSAGE="Cancelled: no project name."
+    return 0
+  fi
+  new_session_in "$project" "$url"
+}
+
+# Session name and branch type for <project>, then start and attach. With a
+# URL, rd-start clones the project first.
+new_session_in() {
+  local project="$1" url="${2:-}" session args=()
 
   clear_screen
   printf '%sNew session in %s%s\n\n' "$BOLD" "$project" "$RESET"
@@ -432,7 +480,7 @@ action_new() {
     args=(--session "$session" --type "$CHOICE")
   fi
 
-  if ! run_command "$RD_BIN/rd-start" "$project" ${args[@]+"${args[@]}"}; then
+  if ! run_command "$RD_BIN/rd-start" "$project" ${url:+"$url"} ${args[@]+"${args[@]}"}; then
     MESSAGE="Could not start $project/$session."
     return 0
   fi
@@ -457,6 +505,7 @@ while true; do
     u) if (( ${#STATES[@]} > 0 )); then action_update "$CURSOR"; load_sessions; fi ;;
     x) if (( ${#STATES[@]} > 0 )); then action_remove "$CURSOR"; load_sessions; fi ;;
     n) action_new; load_sessions ;;
+    c) action_clone; load_sessions ;;
     r) load_sessions; MESSAGE="Refreshed." ;;
     q|esc) break ;;
   esac

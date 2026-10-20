@@ -134,7 +134,9 @@ Provider config written by `bootstrap.sh` (on the VM, not tracked):
   `rd-restart` is per session — keep them separate. `rd-start` re-creating a
   stopped session continues the worktree's last conversation (`--continue`)
   when one exists, unless `--fresh`.
-- **`rd-tui` owns no logic.** It renders and shells out to `rd-start` /
+- **`rd-tui` owns no logic.** Its clone flow (`c`, or the first item of `n`)
+  only suggests a project name from the URL and calls `rd-start <project>
+  <url>`; cloning and name validation stay in `rd-start`. It renders and shells out to `rd-start` /
   `rd-attach` / `rd-stop` / `rd-restart` / `rd-remove`, and enumerates through
   `rd-list --porcelain --all` (the one place that knows a stopped session is a
   `~/worktrees/<project>/<session>` directory with no tmux session). Keep new

@@ -33,7 +33,8 @@ It lists every session, running and stopped, and drives the other helpers:
 | `s` | stop (keeps the worktree and branch) |
 | `u` | update Claude and restart the session, resuming its conversation |
 | `x` | remove a stopped session's worktree |
-| `n` | new session: pick a project, name it, pick feature/bugfix |
+| `n` | new session: pick a project (or **+ clone from URL…**), name it, pick feature/bugfix |
+| `c` | clone a project from a git URL (name suggested from the repo), then start a session in it |
 | `r` / `q` | refresh / quit |
 
 Attaching replaces `rd-tui` with tmux, so `Ctrl-b` `d` returns you to the shell.

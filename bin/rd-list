@@ -6,9 +6,11 @@
 #   rd-list --porcelain      tab-separated rows for scripts (rd-tui uses this)
 #
 # Porcelain columns: state, project, session, branch, dir, created (epoch),
-# provider. 'created' and 'provider' are empty for stopped sessions — there is
-# no tmux session to ask. Provider is appended last so older readers that stop
-# at 'created' keep working.
+# provider, activity (idle/busy/exited, from rd-claude-hook), claude (the
+# release the session started), update ('outdated' when that differs from the
+# installed release). Everything after 'dir' is empty for stopped sessions —
+# there is no tmux session to ask. New columns are appended so older readers
+# that stop earlier keep working.
 set -euo pipefail
 
 usage() {
@@ -26,8 +28,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-fmt=$'#{session_name}\t#{@rd_project}\t#{@rd_session}\t#{session_created}\t#{?session_attached,attached,detached}\t#{pane_current_path}\t#{@rd_provider}'
+# \x1f, not a tab: `read` collapses runs of whitespace separators, which would
+# shift every column after an empty field (a legacy session has no provider).
+US=$'\x1f'
+fmt="#{session_name}${US}#{@rd_project}${US}#{@rd_session}${US}#{session_created}${US}#{?session_attached,attached,detached}${US}#{pane_current_path}${US}#{@rd_provider}${US}#{@rd_claude_state}${US}#{@rd_claude_version}"
 running="$(tmux list-sessions -F "$fmt" 2>/dev/null | grep -E '^claude-' || true)"
+installed="$(claude --version 2>/dev/null | awk 'NR == 1 { print $1 }' || true)"
 
 rows=()
 seen=()
@@ -36,7 +42,7 @@ branch_of() {
   git -C "$1" branch --show-current 2>/dev/null || true
 }
 
-while IFS=$'\t' read -r name project rd_session created state path provider; do
+while IFS="$US" read -r name project rd_session created state path provider activity version; do
   [[ -n "$name" ]] || continue
   if [[ -z "$project" ]]; then
     # Legacy session created before metadata was stored on the tmux session.
@@ -45,7 +51,11 @@ while IFS=$'\t' read -r name project rd_session created state path provider; do
   fi
   rd_session="${rd_session:-default}"
   seen+=("$project/$rd_session")
-  rows+=("$state"$'\t'"$project"$'\t'"$rd_session"$'\t'"$(branch_of "$path")"$'\t'"$path"$'\t'"$created"$'\t'"${provider:-}")
+  update=""
+  if [[ -n "$installed" && -n "$version" && "$version" != "$installed" ]]; then
+    update="outdated"
+  fi
+  rows+=("$state"$'\t'"$project"$'\t'"$rd_session"$'\t'"$(branch_of "$path")"$'\t'"$path"$'\t'"$created"$'\t'"${provider:-}"$'\t'"${activity:-}"$'\t'"${version:-}"$'\t'"$update")
 done <<< "$running"
 
 if [[ "$ALL" -eq 1 ]]; then
@@ -62,7 +72,7 @@ if [[ "$ALL" -eq 1 ]]; then
       done
     fi
     [[ "$known" -eq 0 ]] || continue
-    rows+=("stopped"$'\t'"$project"$'\t'"$session"$'\t'"$(branch_of "$dir")"$'\t'"$dir"$'\t'$'\t')
+    rows+=("stopped"$'\t'"$project"$'\t'"$session"$'\t'"$(branch_of "$dir")"$'\t'"$dir"$'\t'$'\t'$'\t'$'\t'$'\t')
   done
   shopt -u nullglob
 fi
@@ -79,14 +89,27 @@ if [[ "$PORCELAIN" -eq 1 ]]; then
   exit 0
 fi
 
-printf '%-18s %-18s %-9s %-17s %-10s %-24s %s\n' PROJECT SESSION STATE CREATED PROVIDER BRANCH DIR
-while IFS=$'\t' read -r state project session branch dir created provider; do
+printf '%-18s %-18s %-9s %-9s %-17s %-10s %-10s %-24s %s\n' \
+  PROJECT SESSION STATE ACTIVITY CREATED PROVIDER CLAUDE BRANCH DIR
+any_outdated=0
+while IFS= read -r line; do
+  IFS="$US" read -r state project session branch dir created provider activity version update \
+    <<< "${line//$'\t'/$US}"
   [[ -n "$state" ]] || continue
   if [[ -n "$created" ]]; then
     when="$(date -d "@$created" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$created")"
   else
     when="-"
   fi
-  printf '%-18s %-18s %-9s %-17s %-10s %-24s %s\n' \
-    "$project" "$session" "$state" "$when" "${provider:--}" "${branch:--}" "$dir"
+  if [[ "$update" == "outdated" ]]; then
+    version="$version*"
+    any_outdated=1
+  fi
+  printf '%-18s %-18s %-9s %-9s %-17s %-10s %-10s %-24s %s\n' \
+    "$project" "$session" "$state" "${activity:--}" "$when" "${provider:--}" \
+    "${version:--}" "${branch:--}" "$dir"
 done <<< "$sorted"
+if [[ "$any_outdated" -eq 1 ]]; then
+  echo
+  echo "* older than the installed Claude $installed — move a session with: rd-restart <project> [--session <name>]"
+fi

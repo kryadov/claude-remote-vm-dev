@@ -132,6 +132,41 @@ test_n_declines_to_stop_when_not_confirmed() {
   [[ "$output" == *"Cancelled."* ]]
 }
 
+# Claude already on the published release, so rd-update is a no-op; the
+# session predates the hooks, so rd-restart refuses (exit 3) and the TUI must
+# offer --force.
+test_u_restarts_and_offers_force_when_state_is_unknown() {
+  local output
+  setup_running_and_stopped update
+  export CLAUDE_STUB_DIR="$TEST_ROOT/update/claude-stub"
+  mkdir -p "$CLAUDE_STUB_DIR"
+  echo 2.1.1 > "$CLAUDE_STUB_DIR/version"
+  printf '#!/usr/bin/env bash\necho 2.1.1\n' > "$TEST_ROOT/bin/npm"
+  chmod +x "$TEST_ROOT/bin/npm"
+
+  # u, confirm, any key after the refusal, confirm --force, quit
+  output="$(tui 'uy yq')"
+  unset CLAUDE_STUB_DIR
+  rm -f "$TEST_ROOT/bin/npm"
+  [[ "$output" == *"Restart backend/default anyway?"* ]] || {
+    echo "rd-tui did not offer --force after the refusal" >&2
+    return 1
+  }
+  grep -q '^respawn-pane -t =claude-backend: ' "$TMUX_LOG_FILE"
+  [[ "$output" == *"Restarted backend/default."* ]]
+}
+
+test_u_declines_when_not_confirmed() {
+  local output
+  setup_running_and_stopped update_decline
+  output="$(tui 'unq')"
+  if grep -q '^respawn-pane' "$TMUX_LOG_FILE"; then
+    echo "rd-tui restarted a session without confirmation" >&2
+    return 1
+  fi
+  [[ "$output" == *"Cancelled."* ]]
+}
+
 test_x_removes_a_stopped_worktree_and_keeps_the_branch() {
   local output
   setup_running_and_stopped remove
@@ -235,6 +270,8 @@ test_enter_attaches_to_the_selected_running_session
 test_enter_restarts_a_stopped_session_before_attaching
 test_s_stops_the_session_after_confirmation
 test_n_declines_to_stop_when_not_confirmed
+test_u_restarts_and_offers_force_when_state_is_unknown
+test_u_declines_when_not_confirmed
 test_x_removes_a_stopped_worktree_and_keeps_the_branch
 test_x_refuses_to_remove_a_running_session
 test_new_session_wizard_starts_and_attaches

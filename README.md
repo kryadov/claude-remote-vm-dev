@@ -31,6 +31,7 @@ It lists every session, running and stopped, and drives the other helpers:
 | `↑` `↓` (or `k` `j`) | move |
 | `enter` | attach; a stopped session is started first |
 | `s` | stop (keeps the worktree and branch) |
+| `u` | update Claude and restart the session, resuming its conversation |
 | `x` | remove a stopped session's worktree |
 | `n` | new session: pick a project, name it, pick feature/bugfix |
 | `r` / `q` | refresh / quit |
@@ -50,6 +51,9 @@ rd-start backend --session bedrock-try --provider bedrock   # override the defau
 
 rd-attach backend --session login-timeout    # detach: Ctrl-b then d
 rd-stop backend --session login-timeout      # keep the worktree and branch
+rd-update                                    # install the latest Claude (no-op if current)
+rd-restart backend --session login-timeout   # restart on it, resume the conversation
+rd-restart backend --update                  # both in one step
 rd-remove backend --session login-timeout    # remove a clean, stopped worktree
 rd-remove backend --session old-fix --delete-branch
 rd-list                                    # running sessions
@@ -79,6 +83,24 @@ List sessions from the laptop without attaching:
 ```bash
 ./sessions.sh                      # Windows: sessions.bat  or  .\sessions.ps1
 ```
+
+### Updating Claude under long-running sessions
+
+Sessions live for days; Claude releases several times a week. A running
+session keeps the binary it started with, so updating is two steps:
+`rd-update` installs the new release once per VM (Claude is a root-owned npm
+global, which its own auto-updater cannot write), and `rd-restart` moves one
+session onto it. `rd-list` and `rd-tui` mark sessions on an older release with
+`*` in the `CLAUDE` column, and show `ACTIVITY` (`idle` / `busy` / `exited`).
+
+`rd-restart` restarts Claude in the same pane — same worktree, branch and
+provider — and resumes the same conversation (`--resume <id>`; the id is
+recorded by a hook `rd-claude` adds through `claude --settings`, so your
+`~/.claude/settings.json` is untouched). It refuses while a turn is in
+progress (exit 3) unless you pass `--force`. Sessions started before this
+existed have no recorded state: the first restart needs `--force` and resumes
+with `--continue`. Background processes Claude started in the pane die with
+it; Docker containers keep running.
 
 Typical loop: start a session, give Claude a task, **close your laptop**. Later,
 reconnect (VS Code Remote-SSH for diffs, `rd-attach` for questions), review the
@@ -293,6 +315,10 @@ bin/rd-tui                   # interactive session picker (wraps the rd-* helper
 bin/rd-auth                  # one-command authorization: provider + forge + git author
 bin/rd-vscode-init           # add a project-scoped automatic attach task
 bin/rd-attach-here           # attach using the opened worktree path
+bin/rd-claude                # launches Claude with the rd hooks (--settings)
+bin/rd-claude-hook           # hook: records conversation id + idle/busy in tmux
+bin/rd-restart               # restart a session on the installed Claude, resume it
+bin/rd-update                # install the latest Claude (no-op if current)
 rd.env.example               # config template (copy to rd.env)
 DEV.md                       # contributor notes (Windows: Hyper-V smoke-test VM)
 bin/rd-*                     # tmux session helpers (installed to ~/.local/bin)

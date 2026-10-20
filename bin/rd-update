@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Install the latest (or a given) Claude Code release on this VM. Running
+# sessions keep their binary until rd-restart, so this never interrupts one.
+#
+#   rd-update [<version>]
+#
+# A no-op when that version is already installed, so it is safe to call before
+# every restart. bootstrap.sh installs Claude as a root-owned npm global, which
+# Claude's own updater cannot write; a native install updates itself instead.
+set -euo pipefail
+
+PACKAGE="@anthropic-ai/claude-code"
+
+usage() {
+  echo "usage: rd-update [<version>]" >&2
+  exit 2
+}
+
+[[ $# -le 1 ]] || usage
+TARGET="${1:-}"
+[[ "$TARGET" != -* ]] || usage
+
+installed_version() {
+  claude --version 2>/dev/null | awk 'NR == 1 { print $1 }' || true
+}
+
+CURRENT="$(installed_version)"
+if [[ -z "$TARGET" ]]; then
+  TARGET="$(npm view "$PACKAGE" version 2>/dev/null || true)"
+  [[ -n "$TARGET" ]] || {
+    echo "rd-update: could not read the latest version (npm view $PACKAGE version)" >&2
+    exit 1
+  }
+fi
+
+if [[ "$CURRENT" == "$TARGET" ]]; then
+  echo "Claude Code is already on $TARGET."
+  exit 0
+fi
+
+NPM_GLOBAL=0
+npm ls -g --depth=0 "$PACKAGE" >/dev/null 2>&1 && NPM_GLOBAL=1
+
+install_version() {
+  if [[ "$NPM_GLOBAL" -eq 1 ]]; then
+    sudo npm install -g "$PACKAGE@$1"
+  else
+    claude install "$1"
+  fi
+}
+
+echo "Updating Claude Code ${CURRENT:-<none>} -> $TARGET"
+install_version "$TARGET" || true
+
+# The native binary is an optional per-platform package that has lagged a
+# release before; npm then "succeeds" with a claude that cannot run.
+NOW="$(installed_version)"
+if [[ "$NOW" == "$TARGET" ]]; then
+  echo "Claude Code is now $TARGET. Running sessions move to it with rd-restart."
+  exit 0
+fi
+
+echo "rd-update: $TARGET did not install a working claude (claude --version: '${NOW:-fails}')." >&2
+if [[ -n "$CURRENT" ]]; then
+  echo "rd-update: rolling back to $CURRENT" >&2
+  install_version "$CURRENT" || true
+fi
+echo "rd-update: see which releases have a native package: npm view $PACKAGE-linux-x64 versions" >&2
+exit 1

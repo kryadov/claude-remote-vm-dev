@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Launches Claude Code the way every rd session runs it. rd-start and
+# rd-restart type this into the session's pane; run it by hand after exiting
+# Claude (`rd-claude --continue`) to get the same behaviour back.
+#
+#   rd-claude [claude args...]
+#
+# Adds the rd hooks through --settings (the user's ~/.claude/settings.json is
+# never touched) and records which release this pane started, so rd-list can
+# tell a session that runs an older Claude than the one installed.
+set -euo pipefail
+
+RD_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RD_CONFIG_DIR="${RD_CONFIG_DIR:-$HOME/.config/rd}"
+SETTINGS="$RD_CONFIG_DIR/claude-settings.json"
+
+# Rewritten on every launch so an updated repo refreshes the hooks.
+json_string() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+
+hook() {
+  local command
+  printf -v command '%q %s' "$RD_BIN/rd-claude-hook" "$1"
+  printf '[{"hooks": [{"type": "command", "command": %s}]}]' "$(json_string "$command")"
+}
+
+mkdir -p "$RD_CONFIG_DIR"
+tmp="$(mktemp "$SETTINGS.XXXXXX")"
+cat > "$tmp" <<EOF
+{
+  "hooks": {
+    "SessionStart": $(hook session-start),
+    "UserPromptSubmit": $(hook prompt),
+    "Stop": $(hook stop),
+    "SessionEnd": $(hook session-end)
+  }
+}
+EOF
+mv -f "$tmp" "$SETTINGS"
+
+if [[ -n "${TMUX_PANE:-}" ]]; then
+  version="$(claude --version 2>/dev/null | awk 'NR == 1 { print $1 }' || true)"
+  tmux set-option -t "$TMUX_PANE" @rd_claude_version "$version" 2>/dev/null || true
+  tmux set-option -t "$TMUX_PANE" @rd_claude_pane "$TMUX_PANE" 2>/dev/null || true
+fi
+
+exec claude --dangerously-skip-permissions --settings "$SETTINGS" "$@"

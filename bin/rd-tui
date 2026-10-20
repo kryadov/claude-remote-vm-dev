@@ -4,8 +4,9 @@
 #   rd-tui
 #
 # Arrow keys (or j/k) move, enter attaches (starting a stopped session first),
-# s stops, x removes a stopped session's worktree, n walks through creating a
-# new one, r refreshes, q quits. Attaching replaces this process with tmux, so
+# s stops, u restarts on the latest Claude (resuming the conversation), x
+# removes a stopped session's worktree, n walks through creating a new one, r
+# refreshes, q quits. Attaching replaces this process with tmux, so
 # detaching with Ctrl-b d drops you back to the shell.
 #
 # All state changes go through rd-start / rd-attach / rd-stop / rd-remove:
@@ -98,19 +99,26 @@ SESSIONS=()
 BRANCHES=()
 DIRS=()
 PROVIDERS=()
+ACTIVITIES=()
+VERSIONS=()
 CURSOR=0
 MESSAGE=""
 
 load_sessions() {
-  local porcelain state project session branch dir created provider
+  local porcelain line state project session branch dir created provider activity version update
   STATES=()
   PROJECTS=()
   SESSIONS=()
   BRANCHES=()
   DIRS=()
   PROVIDERS=()
+  ACTIVITIES=()
+  VERSIONS=()
   porcelain="$("$RD_BIN/rd-list" --porcelain --all)"
-  while IFS=$'\t' read -r state project session branch dir created provider; do
+  # Re-split on \x1f: a tab IFS would collapse empty middle columns.
+  while IFS= read -r line; do
+    IFS=$'\x1f' read -r state project session branch dir created provider activity version update \
+      <<< "${line//$'\t'/$'\x1f'}"
     [[ -n "$state" ]] || continue
     : "${created:-}"
     STATES+=("$state")
@@ -119,6 +127,12 @@ load_sessions() {
     BRANCHES+=("${branch:--}")
     DIRS+=("$dir")
     PROVIDERS+=("${provider:--}")
+    ACTIVITIES+=("${activity:--}")
+    if [[ "$update" == "outdated" ]]; then
+      VERSIONS+=("$version*")
+    else
+      VERSIONS+=("${version:--}")
+    fi
   done <<< "$porcelain"
   if (( CURSOR >= ${#STATES[@]} )); then
     CURSOR=0
@@ -172,7 +186,7 @@ fit() {
 }
 
 render_list() {
-  local index line pw sw vw bw
+  local index line pw sw vw cw bw
   clear_screen
   printf '%sClaude sessions%s  %s%s%s\n\n' \
     "$BOLD" "$RESET" "$DIM" "$(hostname 2>/dev/null || echo VM)" "$RESET"
@@ -183,12 +197,15 @@ render_list() {
     pw="$(column_width PROJECT 24 "${PROJECTS[@]}")"
     sw="$(column_width SESSION 20 "${SESSIONS[@]}")"
     vw="$(column_width PROVIDER 12 "${PROVIDERS[@]}")"
+    cw="$(column_width CLAUDE 12 "${VERSIONS[@]}")"
     bw="$(column_width BRANCH 30 "${BRANCHES[@]}")"
-    printf "  %-${pw}s %-${sw}s %-9s %-${vw}s %-${bw}s %s\n" PROJECT SESSION STATE PROVIDER BRANCH DIR
+    printf "  %-${pw}s %-${sw}s %-9s %-8s %-${vw}s %-${cw}s %-${bw}s %s\n" \
+      PROJECT SESSION STATE ACTIVITY PROVIDER CLAUDE BRANCH DIR
     for index in "${!STATES[@]}"; do
-      printf -v line " %-${pw}s %-${sw}s %-9s %-${vw}s %-${bw}s %s" \
+      printf -v line " %-${pw}s %-${sw}s %-9s %-8s %-${vw}s %-${cw}s %-${bw}s %s" \
         "$(fit "${PROJECTS[$index]}" "$pw")" "$(fit "${SESSIONS[$index]}" "$sw")" \
-        "${STATES[$index]}" "$(fit "${PROVIDERS[$index]}" "$vw")" \
+        "${STATES[$index]}" "${ACTIVITIES[$index]}" "$(fit "${PROVIDERS[$index]}" "$vw")" \
+        "$(fit "${VERSIONS[$index]}" "$cw")" \
         "$(fit "${BRANCHES[$index]}" "$bw")" "${DIRS[$index]}"
       if (( index == CURSOR )); then
         printf '%s>%s%s\n' "$REVERSE" "$line" "$RESET"
@@ -198,8 +215,12 @@ render_list() {
     done
   fi
 
-  printf '\n  %sarrows move   enter attach   s stop   x remove   n new   r refresh   q quit%s\n' \
+  printf '\n  %sarrows move   enter attach   s stop   u update   x remove   n new   r refresh   q quit%s\n' \
     "$DIM" "$RESET"
+  if [[ " ${VERSIONS[*]-} " == *"* "* ]]; then
+    printf '  %s* runs an older Claude than the installed one — u restarts it on the latest%s\n' \
+      "$DIM" "$RESET"
+  fi
   if [[ -n "$MESSAGE" ]]; then
     printf '\n  %s\n' "$MESSAGE"
   fi
@@ -325,6 +346,38 @@ action_stop() {
   return 0
 }
 
+# rd-restart owns the rules (busy check, resume id); exit 3 is its "busy or
+# unknown" refusal, which is the one case worth offering --force for.
+action_update() {
+  local index="$1"
+  local project="${PROJECTS[$index]}" session="${SESSIONS[$index]}" state="${STATES[$index]}"
+  local args=() status=0
+  if [[ "$state" == "stopped" ]]; then
+    MESSAGE="$project/$session is stopped — enter starts it on the installed Claude."
+    return 0
+  fi
+  if ! confirm "Update Claude and restart $project/$session? (the conversation resumes)"; then
+    MESSAGE="Cancelled."
+    return 0
+  fi
+  mapfile -t args < <(session_args "$session")
+  run_command "$RD_BIN/rd-restart" "$project" ${args[@]+"${args[@]}"} --update || status=$?
+  if (( status == 3 )); then
+    if ! confirm "Restart $project/$session anyway? (a turn in progress is lost)"; then
+      MESSAGE="Cancelled."
+      return 0
+    fi
+    status=0
+    run_command "$RD_BIN/rd-restart" "$project" ${args[@]+"${args[@]}"} --force || status=$?
+  fi
+  if (( status == 0 )); then
+    MESSAGE="Restarted $project/$session."
+  else
+    MESSAGE="Could not restart $project/$session."
+  fi
+  return 0
+}
+
 action_remove() {
   local index="$1"
   local project="${PROJECTS[$index]}" session="${SESSIONS[$index]}" state="${STATES[$index]}"
@@ -401,6 +454,7 @@ while true; do
     down|j) if (( CURSOR < ${#STATES[@]} - 1 )); then CURSOR=$((CURSOR + 1)); fi ;;
     enter) if (( ${#STATES[@]} > 0 )); then action_attach "$CURSOR"; fi ;;
     s) if (( ${#STATES[@]} > 0 )); then action_stop "$CURSOR"; load_sessions; fi ;;
+    u) if (( ${#STATES[@]} > 0 )); then action_update "$CURSOR"; load_sessions; fi ;;
     x) if (( ${#STATES[@]} > 0 )); then action_remove "$CURSOR"; load_sessions; fi ;;
     n) action_new; load_sessions ;;
     r) load_sessions; MESSAGE="Refreshed." ;;

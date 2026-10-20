@@ -2,14 +2,14 @@
 # Shared helpers for the rd-* test scripts.
 #   . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-# Installs the tmux/ssh stubs into <dir>, which the caller puts first on PATH.
+# Installs the tmux/ssh/claude stubs into <dir>, which the caller puts first on PATH.
 # They are copied (not used in place) so the executable bit is set regardless of
 # how the repo was checked out.
 rd_test_install_stubs() {
   local dest="$1" stubs
   stubs="$(cd "$(dirname "${BASH_SOURCE[0]}")/stubs" && pwd)"
   mkdir -p "$dest"
-  install -m 0755 "$stubs/tmux" "$stubs/ssh" "$dest/"
+  install -m 0755 "$stubs/tmux" "$stubs/ssh" "$stubs/claude" "$dest/"
 }
 
 rd_test_new_repo() {

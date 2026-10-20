@@ -223,9 +223,9 @@ test_anthropic_subscription_keeps_one_token_from_a_repeated_paste() {
   output="$(run_auth "$home" <<< "sk-ant-oat01-EXAMPLEsk-ant-oat01-EXAMPLEsk-ant-oat01-EXA")"
   grep -qx 'export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-EXAMPLE' \
     "$home/.config/rd/providers/anthropic.env"
-  [[ "$output" == *"received sk-ant-oat01-E… (20 chars)"* ]]
-  [[ "$output" != *"sk-ant-oat01-EXAMPLE"* ]] || {
-    echo "rd-auth echoed the token back" >&2
+  # setup-token prints the token itself; rd-auth's confirmation must not.
+  [[ "$(grep 'received' <<< "$output")" == "   received sk-ant-oat01-E… (20 chars)" ]] || {
+    echo "unexpected confirmation: $(grep 'received' <<< "$output")" >&2
     return 1
   }
 }

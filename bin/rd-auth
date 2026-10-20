@@ -210,9 +210,12 @@ case "$FORGE" in
     if gh auth status --hostname "$FORGE_HOST" >/dev/null 2>&1; then
       echo "   already logged in to $FORGE_HOST ✓"
     else
-      echo "   Create a token (scopes: repo, read:org), then choose 'Token' and paste it:"
-      echo "   $FORGE_SCHEME://$FORGE_HOST/settings/tokens/new?scopes=repo,read:org&description=remote-dev-vm"
-      gh auth login --hostname "$FORGE_HOST"
+      # Device flow, no questions: the VM has no browser, so gh only prints a
+      # one-time code; GH_BROWSER=true stops it trying xdg-open (and failing
+      # noisily). Its clipboard warning is harmless — the code is printed.
+      echo "   On your laptop open $FORGE_SCHEME://$FORGE_HOST/login/device and enter the code below."
+      echo "   (gh says it cannot copy the code or open a browser — expected on a VM.)"
+      GH_BROWSER=true gh auth login --hostname "$FORGE_HOST" --git-protocol https --web
     fi
     gh auth setup-git --hostname "$FORGE_HOST"
     ;;

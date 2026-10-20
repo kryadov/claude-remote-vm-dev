@@ -306,7 +306,7 @@ test_github_remote_uses_gh() {
 
   run_auth "$home" >/dev/null
 
-  grep -q -- "auth login --hostname github.example.com" "$home/gh-log"
+  grep -q -- "auth login --hostname github.example.com --git-protocol https --web" "$home/gh-log"
   grep -q -- "auth setup-git --hostname github.example.com" "$home/gh-log"
   [[ ! -f "$home/glab-log" ]]
 }

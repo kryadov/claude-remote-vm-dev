@@ -294,6 +294,7 @@ bin/rd-auth                  # one-command authorization: provider + forge + git
 bin/rd-vscode-init           # add a project-scoped automatic attach task
 bin/rd-attach-here           # attach using the opened worktree path
 rd.env.example               # config template (copy to rd.env)
+DEV.md                       # contributor notes (Windows: Hyper-V smoke-test VM)
 bin/rd-*                     # tmux session helpers (installed to ~/.local/bin)
 systemd/tmux-claude.service  # persistent tmux user service
 hardening/                   # sshd, unattended-upgrades, egress allowlist

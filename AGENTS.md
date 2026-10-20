@@ -79,6 +79,7 @@ connect.sh / .ps1 / .bat     # laptop-side SSH helper (reads rd.env); --tui / st
 sessions.sh / .ps1 / .bat    # laptop-side: list VM sessions without attaching
 sync-memory.sh               # laptop-side: push/pull ~/.claude/projects/<path>/memory
 rd.env.example               # config template -> copy to rd.env (gitignored)
+DEV.md                       # contributor notes (Windows: Hyper-V smoke-test VM)
 bin/rd-*                     # tmux session helpers, installed to ~/.local/bin
 bin/rd-auth                  # one-command VM authorization (provider + forge + git author)
 bin/rd-tui                   # interactive picker; shells out to the other rd-*

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: rd-start <project> [git-url|path] [--session <name>] [--type feature|bugfix] [--base <ref>] [--branch feature/<name>|bugfix/<name>] [--provider <name>]" >&2
+  echo "usage: rd-start <project> [git-url|path] [--session <name>] [--type feature|bugfix] [--base <ref>] [--branch feature/<name>|bugfix/<name>] [--provider <name>] [--fresh]" >&2
   exit 2
 }
 
@@ -31,6 +31,7 @@ BRANCH=""
 BRANCH_EXPLICIT=0
 PROVIDER=""
 PROVIDER_EXPLICIT=0
+FRESH=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -56,6 +57,7 @@ while [[ $# -gt 0 ]]; do
       BRANCH_EXPLICIT=1
       shift 2
       ;;
+    --fresh) FRESH=1; shift ;;
     --provider)
       [[ $# -ge 2 ]] || usage
       PROVIDER="$2"
@@ -255,13 +257,26 @@ if [[ -n "$PROVIDER" ]]; then
   tmux set-option -t "=$TMUX_SESSION:" @rd_provider "$PROVIDER"
 fi
 # rd-claude adds the hooks rd-restart relies on; see that script.
+# Starting a stopped session (after rd-stop or a VM reboot) picks its last
+# conversation back up unless --fresh: Claude files a worktree's transcripts
+# under projects/<path, non-alnum -> '-'>, and --continue resumes the newest.
+# With none there, --continue would print "No conversation found" and exit.
+RESUMED=0
 printf -v launch %q "$RD_BIN/rd-claude"
+if [[ "$FRESH" -eq 0 ]] &&
+   compgen -G "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/${WORKDIR//[^A-Za-z0-9]/-}/*.jsonl" >/dev/null; then
+  launch+=" --continue"
+  RESUMED=1
+fi
 tmux send-keys -t "=$TMUX_SESSION:" "$launch" C-m
 
 if [[ -n "$PROVIDER" ]]; then
   echo "Started '$TMUX_SESSION' in $WORKDIR (provider: $PROVIDER)."
 else
   echo "Started '$TMUX_SESSION' in $WORKDIR."
+fi
+if [[ "$RESUMED" -eq 1 ]]; then
+  echo "Continuing its last conversation (start a new one with --fresh)."
 fi
 if [[ "$RD_SESSION" == "default" ]]; then
   echo "Attach with: rd-attach $PROJECT   (detach: Ctrl-b then d)"

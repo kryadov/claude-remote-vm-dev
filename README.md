@@ -47,6 +47,7 @@ rd-start backend                         # default session in ~/projects/backend
 rd-start backend --session new-search    # feature/new-search in its own worktree
 rd-start backend --session login-timeout --type bugfix
 rd-start backend --session experiment --base origin/main
+rd-start backend --session login-timeout --fresh  # new conversation instead of continuing
 rd-start backend --session bedrock-try --provider bedrock   # override the default provider
 
 rd-attach backend --session login-timeout    # detach: Ctrl-b then d
@@ -101,6 +102,11 @@ progress (exit 3) unless you pass `--force`. Sessions started before this
 existed have no recorded state: the first restart needs `--force` and resumes
 with `--continue`. Background processes Claude started in the pane die with
 it; Docker containers keep running.
+
+Starting a *stopped* session again — after `rd-stop`, or after the VM rebooted
+— also picks up where it left off: `rd-start` runs Claude with `--continue`
+when the worktree already has a conversation. Pass `--fresh` to start a new
+one instead.
 
 Typical loop: start a session, give Claude a task, **close your laptop**. Later,
 reconnect (VS Code Remote-SSH for diffs, `rd-attach` for questions), review the

@@ -131,7 +131,9 @@ Provider config written by `bootstrap.sh` (on the VM, not tracked):
   Claude's context) and always exit 0. `rd-restart` refuses anything but
   `idle`/`exited` without `--force` (exit 3), and validates the session id
   before typing it into the pane. `rd-update` is per VM and idempotent;
-  `rd-restart` is per session — keep them separate.
+  `rd-restart` is per session — keep them separate. `rd-start` re-creating a
+  stopped session continues the worktree's last conversation (`--continue`)
+  when one exists, unless `--fresh`.
 - **`rd-tui` owns no logic.** It renders and shells out to `rd-start` /
   `rd-attach` / `rd-stop` / `rd-restart` / `rd-remove`, and enumerates through
   `rd-list --porcelain --all` (the one place that knows a stopped session is a

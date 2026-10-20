@@ -135,6 +135,27 @@ test_rd_start_launches_through_rd_claude() {
   [[ "$(last_send_keys)" == *"/bin/rd-claude C-m" ]]
 }
 
+# After rd-stop or a VM reboot the tmux session is gone but the transcripts
+# are not: starting it again continues where it was, unless --fresh.
+test_start_continues_a_stopped_sessions_conversation() {
+  local worktree output
+  setup_case start-continue
+  rd rd-start demo --session search >/dev/null
+  worktree="$HOME_DIR/worktrees/demo/search"
+  worktree="$(cd "$worktree" && pwd -P)"
+  mkdir -p "$HOME_DIR/.claude/projects/${worktree//[^A-Za-z0-9]/-}"
+  : > "$HOME_DIR/.claude/projects/${worktree//[^A-Za-z0-9]/-}/old.jsonl"
+  rd rd-stop demo --session search >/dev/null
+
+  output="$(rd rd-start demo --session search)"
+  [[ "$(last_send_keys)" == *"/bin/rd-claude --continue C-m" ]]
+  [[ "$output" == *"--fresh"* ]]
+
+  rd rd-stop demo --session search >/dev/null
+  rd rd-start demo --session search --fresh >/dev/null
+  [[ "$(last_send_keys)" == *"/bin/rd-claude C-m" ]]
+}
+
 test_restart_refuses_unknown_state_with_exit_3() {
   local status=0 output
   setup_case unknown
@@ -307,6 +328,7 @@ test_hook_rejects_an_id_that_is_not_plain
 test_hook_outside_tmux_does_nothing
 test_rd_claude_launches_with_hooks_and_records_version
 test_rd_start_launches_through_rd_claude
+test_start_continues_a_stopped_sessions_conversation
 test_restart_refuses_unknown_state_with_exit_3
 test_restart_refuses_busy_session
 test_restart_resumes_the_recorded_conversation

@@ -249,7 +249,7 @@ CLOUD_ML_REGION=<CLOUD_ML_REGION>
 ssh -i <SSH_KEY> <VM_USER>@<VM_IP>
 
 # session management
-rd-start <PROJECT> [--session <SESSION>] [--type feature|bugfix]
+rd-start <PROJECT> [--session <SESSION>] [--type feature|bugfix] [--fresh]
 rd-attach <PROJECT> [--session <SESSION>]
 rd-list
 rd-stop <PROJECT> [--session <SESSION>]

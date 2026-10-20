@@ -131,7 +131,18 @@ fixed when its pane starts".
 
 No session is touched; running processes keep their binary.
 
-### 4.5 `rd-list` and `rd-tui`
+### 4.5 `rd-start` continues a stopped session
+
+Found on the test VM: after a reboot (unattended-upgrades can trigger one) the
+tmux sessions are gone but their transcripts are not, and `rd-start` used to
+open a new, empty conversation. When it creates the tmux session for a
+worktree that already has transcripts
+(`~/.claude/projects/<worktree path, non-alnum → '-'>/*.jsonl`), it now
+launches `rd-claude --continue`; `--fresh` opts out. With no transcripts it
+starts plainly — `--continue` there makes Claude exit with "No conversation
+found". `rd-restart`'s legacy fallback uses the same check.
+
+### 4.6 `rd-list` and `rd-tui`
 
 `rd-list --porcelain` appends three columns (older readers stop earlier and
 keep working):

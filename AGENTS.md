@@ -214,6 +214,12 @@ There is no compiler; validation is static + a live smoke test on a VM.
   prints its own "not fully merged" error next to rd-remove's "branch preserved"
   line. That pair reads like a contradiction but is correct; force it yourself
   with `git branch -D` if you really mean it.
+- **Commits from Windows drop the executable bit.** NTFS has no mode bits, so a
+  new script is committed as `100644` and `./bootstrap.sh` on a fresh clone
+  fails with "Permission denied" (exit 126). After adding a script, run
+  `git update-index --chmod=+x <file>` and check `git ls-files -s`.
+  `bootstrap-remote.sh` calls `bash ./bootstrap.sh` so provisioning survives a
+  slip.
 - `systemctl --user` needs a running user manager; `bootstrap.sh` calls
   `loginctl enable-linger` first so the service persists without a login. If the
   service fails to start, re-login and re-run the enable step.

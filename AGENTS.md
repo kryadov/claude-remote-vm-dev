@@ -79,13 +79,18 @@ connect.sh / .ps1 / .bat     # laptop-side SSH helper (reads rd.env); --tui / st
 sessions.sh / .ps1 / .bat    # laptop-side: list VM sessions without attaching
 sync-memory.sh               # laptop-side: push/pull ~/.claude/projects/<path>/memory
 rd.env.example               # config template -> copy to rd.env (gitignored)
+DEV.md                       # contributor notes (Windows: Hyper-V smoke-test VM)
 bin/rd-*                     # tmux session helpers, installed to ~/.local/bin
 bin/rd-auth                  # one-command VM authorization (provider + forge + git author)
 bin/rd-tui                   # interactive picker; shells out to the other rd-*
 bin/rd-vscode-init           # writes a project-scoped automatic attach task
 bin/rd-attach-here           # attaches the session owning the opened worktree
+bin/rd-claude                # launches Claude with the rd hooks (--settings)
+bin/rd-claude-hook           # hook: records conversation id + idle/busy in tmux
+bin/rd-restart               # restart a session on the installed Claude, resume it
+bin/rd-update                # install the latest Claude (no-op if current)
 tmux.conf                    # installed to ~/.tmux.conf (mouse scrolling) if absent
-tests/lib.sh, tests/stubs/   # shared test helpers and the tmux/ssh stubs
+tests/lib.sh, tests/stubs/   # shared test helpers and the tmux/ssh/claude stubs
 tests/smoke/                 # real-tmux and real-bootstrap smoke runs (no stubs)
 systemd/tmux-claude.service  # persistent tmux user service
 hardening/                   # sshd drop-in, unattended-upgrades, egress allowlist
@@ -98,6 +103,7 @@ Provider config written by `bootstrap.sh` (on the VM, not tracked):
 ```
 ~/.config/rd/provider              # default provider name for new sessions
 ~/.config/rd/providers/<name>.env  # 0600, sourced by ~/.profile for that provider
+~/.config/rd/claude-settings.json # rd hooks, rewritten by rd-claude on every launch
 ```
 
 ## Conventions
@@ -117,8 +123,21 @@ Provider config written by `bootstrap.sh` (on the VM, not tracked):
 - **Worktree safety:** `rd-stop` only stops tmux. Cleanup belongs in
   `rd-remove`, which rejects active sessions and dirty worktrees and never
   forces branch deletion.
-- **`rd-tui` owns no logic.** It renders and shells out to `rd-start` /
-  `rd-attach` / `rd-stop` / `rd-remove`, and enumerates through
+- **Claude is always launched through `rd-claude`.** It adds the rd hooks via
+  `claude --settings ~/.config/rd/claude-settings.json` — never by editing
+  `~/.claude/settings.json` — and records `@rd_claude_version`/`@rd_claude_pane`.
+  `rd-claude-hook` keeps `@rd_claude_session` and `@rd_claude_state`
+  (`idle`/`busy`/`exited`) current; it must print nothing (hook stdout reaches
+  Claude's context) and always exit 0. `rd-restart` refuses anything but
+  `idle`/`exited` without `--force` (exit 3), and validates the session id
+  before typing it into the pane. `rd-update` is per VM and idempotent;
+  `rd-restart` is per session — keep them separate. `rd-start` re-creating a
+  stopped session continues the worktree's last conversation (`--continue`)
+  when one exists, unless `--fresh`.
+- **`rd-tui` owns no logic.** Its clone flow (`c`, or the first item of `n`)
+  only suggests a project name from the URL and calls `rd-start <project>
+  <url>`; cloning and name validation stay in `rd-start`. It renders and shells out to `rd-start` /
+  `rd-attach` / `rd-stop` / `rd-restart` / `rd-remove`, and enumerates through
   `rd-list --porcelain --all` (the one place that knows a stopped session is a
   `~/worktrees/<project>/<session>` directory with no tmux session). Keep new
   rules in the command that owns them so the CLI and the TUI cannot diverge.
@@ -157,9 +176,16 @@ There is no compiler; validation is static + a live smoke test on a VM.
   `claude`/`git`) — covers every provider and forge path.
 - Provider tests: `bash tests/test-rd-provider.sh` (`rd-start --provider`
   resolution, the tmux `-e` injection, and the `rd-list` provider column).
+- Restart/update tests: `bash tests/test-rd-restart.sh` (hook state machine,
+  resume-argument choice, the busy refusal, `rd-update` install/rollback, the
+  `rd-list` activity/version/outdated columns).
+- Porcelain and tmux formats with possibly-empty middle fields are split on
+  `\x1f`, not a tab: `IFS=$'\t' read` collapses consecutive tabs and shifts
+  every later column.
 - PowerShell helper test: `powershell -NoProfile -ExecutionPolicy Bypass -File
   tests/test-connect.ps1`.
-- Tests stub the outside world (`tests/stubs/tmux`, `tests/stubs/ssh`) and run
+- Tests stub the outside world (`tests/stubs/tmux`, `tests/stubs/ssh`,
+  `tests/stubs/claude` — so a developer's real `claude` on PATH is never run) and run
   against a temp `HOME`; they must never touch a real VM or the user's tmux.
 - Provider smoke (real tmux, real login shell, real worktree — proves the
   `~/.profile` + `tmux -e RD_PROVIDER` mechanism the stubs cannot):
@@ -192,6 +218,12 @@ There is no compiler; validation is static + a live smoke test on a VM.
   prints its own "not fully merged" error next to rd-remove's "branch preserved"
   line. That pair reads like a contradiction but is correct; force it yourself
   with `git branch -D` if you really mean it.
+- **Commits from Windows drop the executable bit.** NTFS has no mode bits, so a
+  new script is committed as `100644` and `./bootstrap.sh` on a fresh clone
+  fails with "Permission denied" (exit 126). After adding a script, run
+  `git update-index --chmod=+x <file>` and check `git ls-files -s`.
+  `bootstrap-remote.sh` calls `bash ./bootstrap.sh` so provisioning survives a
+  slip.
 - `systemctl --user` needs a running user manager; `bootstrap.sh` calls
   `loginctl enable-linger` first so the service persists without a login. If the
   service fails to start, re-login and re-run the enable step.

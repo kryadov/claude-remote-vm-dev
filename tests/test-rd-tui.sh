@@ -132,6 +132,41 @@ test_n_declines_to_stop_when_not_confirmed() {
   [[ "$output" == *"Cancelled."* ]]
 }
 
+# Claude already on the published release, so rd-update is a no-op; the
+# session predates the hooks, so rd-restart refuses (exit 3) and the TUI must
+# offer --force.
+test_u_restarts_and_offers_force_when_state_is_unknown() {
+  local output
+  setup_running_and_stopped update
+  export CLAUDE_STUB_DIR="$TEST_ROOT/update/claude-stub"
+  mkdir -p "$CLAUDE_STUB_DIR"
+  echo 2.1.1 > "$CLAUDE_STUB_DIR/version"
+  printf '#!/usr/bin/env bash\necho 2.1.1\n' > "$TEST_ROOT/bin/npm"
+  chmod +x "$TEST_ROOT/bin/npm"
+
+  # u, confirm, any key after the refusal, confirm --force, quit
+  output="$(tui 'uy yq')"
+  unset CLAUDE_STUB_DIR
+  rm -f "$TEST_ROOT/bin/npm"
+  [[ "$output" == *"Restart backend/default anyway?"* ]] || {
+    echo "rd-tui did not offer --force after the refusal" >&2
+    return 1
+  }
+  grep -q '^respawn-pane -t =claude-backend: ' "$TMUX_LOG_FILE"
+  [[ "$output" == *"Restarted backend/default."* ]]
+}
+
+test_u_declines_when_not_confirmed() {
+  local output
+  setup_running_and_stopped update_decline
+  output="$(tui 'unq')"
+  if grep -q '^respawn-pane' "$TMUX_LOG_FILE"; then
+    echo "rd-tui restarted a session without confirmation" >&2
+    return 1
+  fi
+  [[ "$output" == *"Cancelled."* ]]
+}
+
 test_x_removes_a_stopped_worktree_and_keeps_the_branch() {
   local output
   setup_running_and_stopped remove
@@ -156,8 +191,8 @@ test_x_refuses_to_remove_a_running_session() {
 
 test_new_session_wizard_starts_and_attaches() {
   setup_case wizard
-  # n -> pick 'backend' (enter) -> name 'wizard' -> pick 'bugfix' (down, enter)
-  tui 'n\nwizard\n\033[B\n' >/dev/null
+  # n -> pick 'backend' (down past the clone item, enter) -> name 'wizard' -> pick 'bugfix' (down, enter)
+  tui 'n\033[B\nwizard\n\033[B\n' >/dev/null
 
   [[ "$(git -C "$HOME_DIR/worktrees/backend/wizard" branch --show-current)" == "bugfix/wizard" ]] || {
     echo "the wizard did not create a bugfix worktree" >&2
@@ -168,14 +203,70 @@ test_new_session_wizard_starts_and_attaches() {
 
 test_new_session_wizard_defaults_to_the_default_session() {
   setup_case wizard_default
-  # n -> pick 'backend' (enter) -> empty name -> default session, no type prompt
-  tui 'n\n\n' >/dev/null
+  # n -> pick 'backend' (down past the clone item, enter) -> empty name -> default session, no type prompt
+  tui 'n\033[B\n\n' >/dev/null
 
   grep -q 'new-session .*claude-backend ' "$TMUX_LOG_FILE" || {
     echo "the wizard did not start the default session" >&2
     return 1
   }
   grep -q 'attach -t =claude-backend ' "$TMUX_LOG_FILE"
+}
+
+# A local bare repository stands in for GitHub, so cloning needs no network.
+new_remote() {
+  local bare="$TEST_ROOT/$1/remote/$2.git"
+  rd_test_new_repo "$TEST_ROOT/$1/remote/src"
+  git clone -q --bare "$TEST_ROOT/$1/remote/src" "$bare"
+  printf 'file://%s' "$bare"
+}
+
+test_c_clones_a_project_and_attaches() {
+  local url
+  setup_case clone
+  url="$(new_remote clone tools)"
+  # c -> URL -> enter keeps the suggested name 'tools' -> default session
+  tui "c$url\n\n\n" >/dev/null
+
+  [[ -f "$HOME_DIR/projects/tools/README.md" ]] || {
+    echo "rd-tui did not clone into ~/projects/tools" >&2
+    return 1
+  }
+  grep -q 'new-session .*claude-tools ' "$TMUX_LOG_FILE"
+  grep -q 'attach -t =claude-tools ' "$TMUX_LOG_FILE"
+}
+
+test_clone_from_the_new_wizard_with_a_custom_name_and_session() {
+  local url
+  setup_case clone_wizard
+  url="$(new_remote clone_wizard my.repo)"
+  # n -> enter on '+ clone from URL…' -> URL -> name 'mytools' -> session
+  # 'first' -> feature (enter)
+  tui "n\n$url\nmytools\nfirst\n\n" >/dev/null
+
+  [[ "$(git -C "$HOME_DIR/worktrees/mytools/first" branch --show-current)" == "feature/first" ]] || {
+    echo "the clone wizard did not create the named worktree" >&2
+    return 1
+  }
+  grep -q 'attach -t =claude-mytools--first' "$TMUX_LOG_FILE"
+}
+
+test_clone_suggests_a_valid_project_name() {
+  local output url
+  setup_case clone_name
+  url="$(new_remote clone_name my.repo)"
+  # Esc at the name prompt is not possible (line input), so read the prompt
+  # and cancel with end of input.
+  output="$(tui "c$url\n")"
+  [[ "$output" == *"Project name (enter for my-repo)"* ]]
+}
+
+test_clone_rejects_something_that_is_not_a_url() {
+  local output
+  setup_case clone_bad
+  output="$(tui 'c~/somewhere\nq')"
+  [[ "$output" == *"Not a git URL: ~/somewhere"* ]]
+  [[ ! -e "$HOME_DIR/projects/somewhere" ]]
 }
 
 test_long_names_stay_aligned_and_long_branches_are_truncated() {
@@ -235,10 +326,16 @@ test_enter_attaches_to_the_selected_running_session
 test_enter_restarts_a_stopped_session_before_attaching
 test_s_stops_the_session_after_confirmation
 test_n_declines_to_stop_when_not_confirmed
+test_u_restarts_and_offers_force_when_state_is_unknown
+test_u_declines_when_not_confirmed
 test_x_removes_a_stopped_worktree_and_keeps_the_branch
 test_x_refuses_to_remove_a_running_session
 test_new_session_wizard_starts_and_attaches
 test_new_session_wizard_defaults_to_the_default_session
+test_c_clones_a_project_and_attaches
+test_clone_from_the_new_wizard_with_a_custom_name_and_session
+test_clone_suggests_a_valid_project_name
+test_clone_rejects_something_that_is_not_a_url
 test_long_names_stay_aligned_and_long_branches_are_truncated
 test_connect_tui_runs_rd_tui_over_ssh
 echo "rd-tui tests passed"

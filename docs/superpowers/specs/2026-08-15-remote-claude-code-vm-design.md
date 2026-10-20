@@ -111,7 +111,9 @@ running on the VM. On reconnect: VS Code Remote-SSH for files/diffs,
   `loginctl enable-linger <VM_USER>` + a **systemd user service** that recreates
   the desired tmux sessions on boot.
 - Helper scripts `rd-start`, `rd-attach`, `rd-list`, `rd-stop`, and `rd-remove`
-  manage default and named sessions. `rd-vscode-init` adds a project-scoped
+  manage default and named sessions; `rd-update` and `rd-restart` move a
+  long-running session onto a new Claude release and resume its conversation
+  (see `2026-10-20-claude-update-and-restart-design.md`). `rd-vscode-init` adds a project-scoped
   automatic task; `rd-attach-here` resolves the session from the opened worktree.
 
 ### 6.2 Vertex authentication
@@ -247,10 +249,12 @@ CLOUD_ML_REGION=<CLOUD_ML_REGION>
 ssh -i <SSH_KEY> <VM_USER>@<VM_IP>
 
 # session management
-rd-start <PROJECT> [--session <SESSION>] [--type feature|bugfix]
+rd-start <PROJECT> [--session <SESSION>] [--type feature|bugfix] [--fresh]
 rd-attach <PROJECT> [--session <SESSION>]
 rd-list
 rd-stop <PROJECT> [--session <SESSION>]
+rd-update [<VERSION>]
+rd-restart <PROJECT> [--session <SESSION>] [--update] [--force]
 rd-remove <PROJECT> --session <SESSION> [--delete-branch]
 rd-vscode-init <repo-path>
 ```

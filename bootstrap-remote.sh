@@ -65,7 +65,7 @@ echo "==> Copying rd.env to the VM (bootstrap reads the provider and forge value
 scp -i "$SSH_KEY" "$SCRIPT_DIR/rd.env" "$VM_USER@$VM_IP:~/$REPO_DIR/rd.env"
 
 echo "==> Running bootstrap.sh on the VM"
-ssh -i "$SSH_KEY" "$VM_USER@$VM_IP" "cd ~/$REPO_DIR && ./bootstrap.sh"
+ssh -i "$SSH_KEY" "$VM_USER@$VM_IP" "cd ~/$REPO_DIR && bash ./bootstrap.sh"
 
 cat <<EOF
 

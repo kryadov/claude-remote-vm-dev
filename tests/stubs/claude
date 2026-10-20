@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# claude stub. Installed by default so tests never run the developer's real
+# claude. Without CLAUDE_STUB_DIR it behaves as "not installed": --version fails.
+# With it, the installed release is $CLAUDE_STUB_DIR/version ('broken' makes
+# --version fail, like a release whose native binary is missing), and every
+# call is appended to $CLAUDE_STUB_DIR/log.
+set -euo pipefail
+dir="${CLAUDE_STUB_DIR:-}"
+if [[ -n "$dir" ]]; then
+  printf '%s\n' "$*" >> "$dir/log"
+  printf 'DISABLE_AUTOUPDATER=%s\n' "${DISABLE_AUTOUPDATER:-}" > "$dir/env"
+fi
+case "${1:-}" in
+  --version)
+    [[ -n "$dir" && -f "$dir/version" ]] || exit 1
+    version="$(cat "$dir/version")"
+    [[ "$version" != "broken" ]] || exit 1
+    echo "$version (Claude Code)"
+    ;;
+  install) printf '%s\n' "$2" > "$dir/version" ;;
+  update) cp "$dir/latest" "$dir/version" ;;
+  *) exit 0 ;;
+esac

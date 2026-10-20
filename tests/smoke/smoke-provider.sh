@@ -16,6 +16,15 @@ SMOKE=/tmp/crd-smoke
 rm -rf "$SMOKE"
 mkdir -p "$SMOKE"
 
+# On a provisioned VM this runs from a login shell that already exports the
+# VM's provider. The private tmux server would inherit it, and ~/.profile
+# honours an inherited RD_PROVIDER — so start from a provider-free env.
+unset RD_PROVIDER CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_BEDROCK \
+  ANTHROPIC_VERTEX_PROJECT_ID CLOUD_ML_REGION ANTHROPIC_API_KEY \
+  CLAUDE_CODE_OAUTH_TOKEN AWS_REGION AWS_PROFILE AWS_BEARER_TOKEN_BEDROCK \
+  AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+  ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL
+
 export HOME="$SMOKE/home"
 export TMUX_TMPDIR="$SMOKE/tmux"          # private tmux server
 mkdir -p "$HOME/projects" "$HOME/.config/rd/providers" "$HOME/.local/bin" "$TMUX_TMPDIR"
@@ -29,6 +38,10 @@ check() {
 
 echo "== setup: install helpers the way bootstrap.sh does =="
 install -m 0755 "$REPO"/bin/rd-* "$HOME/.local/bin/"
+# rd-start launches Claude in the pane; a real one would swallow the `env`
+# probes below. This one exits at once and leaves the login shell in charge.
+printf '#!/bin/sh\nexit 0\n' > "$HOME/.local/bin/claude"
+chmod 0755 "$HOME/.local/bin/claude"
 
 # A pre-multi-provider VM: the OLD Vertex block is already in ~/.profile.
 cat > "$HOME/.profile" <<'EOF'
@@ -161,9 +174,9 @@ echo
 echo "== 4. rd-list / rd-start guardrails against a live server =="
 rd-list --porcelain > "$SMOKE/porcelain.txt"
 check "rd-list reports vertex for the default session" \
-  "grep -P '\tdemo\tdefault\t' $SMOKE/porcelain.txt | grep -q 'vertex\$'"
+  "awk -F'\t' '\$2 == \"demo\" && \$3 == \"default\" && \$7 == \"vertex\"' $SMOKE/porcelain.txt | grep -q ."
 check "rd-list reports bedrock for the named session" \
-  "grep -P '\tdemo\tbed\t' $SMOKE/porcelain.txt | grep -q 'bedrock\$'"
+  "awk -F'\t' '\$2 == \"demo\" && \$3 == \"bed\" && \$7 == \"bedrock\"' $SMOKE/porcelain.txt | grep -q ."
 # Captured rather than piped into head: `set -o pipefail` here would otherwise
 # report rd-list's SIGPIPE death as a failure of the column itself.
 rd-list > "$SMOKE/human.txt"
@@ -177,7 +190,21 @@ check "unknown provider is rejected" \
   "! rd-start demo --session other --provider nope"
 
 echo
-echo "== 5. worktree isolation still holds =="
+echo "== 5. rd-restart keeps the pane's provider =="
+# respawn-pane must hand the session environment (RD_PROVIDER) to the new
+# login shell, or a restarted --provider session silently falls back to the
+# VM default. --force: no real Claude ran, so no hook ever reported a state.
+rd-restart demo --session bed --force >/dev/null 2>&1 || true
+pane_env claude-demo--bed "$SMOKE/env-restarted.txt" || echo "  (pane never answered)"
+check "after rd-restart: RD_PROVIDER=bedrock" \
+  "grep -qx 'RD_PROVIDER=bedrock' $SMOKE/env-restarted.txt"
+check "after rd-restart: CLAUDE_CODE_USE_BEDROCK=1" \
+  "grep -qx 'CLAUDE_CODE_USE_BEDROCK=1' $SMOKE/env-restarted.txt"
+check "after rd-restart: pane is back in the worktree" \
+  "grep -qx 'PWD=$HOME/worktrees/demo/bed' $SMOKE/env-restarted.txt"
+
+echo
+echo "== 6. worktree isolation still holds =="
 check "named session got its own worktree" \
   "[ -d $HOME/worktrees/demo/bed ]"
 check "named session is on feature/bed" \

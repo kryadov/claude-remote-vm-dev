@@ -73,21 +73,33 @@ case "$command" in
       echo "tmux format contains a literal backslash-t" >&2
       exit 2
     fi
+    # Render whatever fields the caller asked for. Like real tmux, a control
+    # character in the format comes back escaped ("\037" for \x1f), so a
+    # caller that splits on one gets a single unsplittable column.
+    if [[ "$format" == *$'\x1f'* ]]; then
+      printf '%s\n' "${format//$'\x1f'/\\037}"
+      exit 0
+    fi
+    IFS=$'\t' read -r -a fields <<< "$format"
+    sep=$'\t'
     while IFS=$'\t' read -r name created state path; do
       [[ -n "$name" ]] || continue
-      project="$(cat "$TMUX_STATE.$name.rd_project" 2>/dev/null || true)"
-      session="$(cat "$TMUX_STATE.$name.rd_session" 2>/dev/null || true)"
-      if [[ "$format" == *"@rd_worktree"* ]]; then
-        worktree="$(cat "$TMUX_STATE.$name.rd_worktree" 2>/dev/null || true)"
-        printf '%s\t%s\t%s\t%s\n' "$name" "$project" "$session" "$worktree"
-      elif [[ "$format" == *"@rd_provider"* ]]; then
-        provider="$(cat "$TMUX_STATE.$name.rd_provider" 2>/dev/null || true)"
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-          "$name" "$project" "$session" "$created" "$state" "$path" "$provider"
-      else
-        printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-          "$name" "$project" "$session" "$created" "$state" "$path"
-      fi
+      row=""
+      for i in "${!fields[@]}"; do
+        case "${fields[$i]}" in
+          '#{session_name}') value="$name" ;;
+          '#{session_created}') value="$created" ;;
+          '#{?session_attached,attached,detached}') value="$state" ;;
+          '#{pane_current_path}') value="$path" ;;
+          '#{@'*'}')
+            option="${fields[$i]#'#{@'}"
+            value="$(cat "$TMUX_STATE.$name.${option%'}'}" 2>/dev/null || true)"
+            ;;
+          *) value="" ;;
+        esac
+        (( i == 0 )) && row="$value" || row="$row$sep$value"
+      done
+      printf '%s\n' "$row"
     done < "$TMUX_STATE"
     ;;
   attach|attach-session)

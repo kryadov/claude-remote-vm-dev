@@ -295,5 +295,6 @@ cat <<EOF
   6) Attach / detach:                               rd-attach <project> [--session <name>]
                                                      (detach: Ctrl-b then d)
   7) List / stop / remove:                          rd-list [--all] ; rd-stop <project> [--session <name>]
-  8) VS Code automatic attach (per repo):           rd-vscode-init ~/projects/<project>
+  8) Move a session to the latest Claude:           rd-restart <project> [--session <name>] --update
+  9) VS Code automatic attach (per repo):           rd-vscode-init ~/projects/<project>
 EOF

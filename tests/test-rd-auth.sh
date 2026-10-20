@@ -51,6 +51,7 @@ cat > "$TEST_ROOT/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$HOME/claude-log"
 [[ "$1" == "setup-token" ]] || exit 1
+echo "Visit https://claude.example/oauth to authorize"
 echo "sk-ant-oat01-EXAMPLE"
 EOF
 
@@ -197,13 +198,64 @@ test_anthropic_subscription_writes_oauth_token() {
   home="$(auth_home anthropic anthropic)"
   printf '# anthropic\n' > "$home/.config/rd/providers/anthropic.env"
 
-  run_auth "$home" >/dev/null
+  local output
+  # The token is pasted back after setup-token, which must own the terminal.
+  output="$(run_auth "$home" <<< "sk-ant-oat01-EXAMPLE")"
 
   grep -q "setup-token" "$home/claude-log"
+  # setup-token's own output (URL, code prompt) must reach the user, not a pipe.
+  [[ "$output" == *"Visit https://claude.example/oauth"* ]] || {
+    echo "setup-token output was swallowed: $output" >&2
+    return 1
+  }
   grep -q 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-EXAMPLE' \
     "$home/.config/rd/providers/anthropic.env"
   mode="$(stat -c '%a' "$home/.config/rd/providers/anthropic.env")"
   [[ "$mode" == "600" ]]
+}
+
+# The prompt is hidden, so users paste again when nothing seems to happen.
+test_anthropic_subscription_keeps_one_token_from_a_repeated_paste() {
+  local home output
+  home="$(auth_home repaste anthropic)"
+  printf '# anthropic\n' > "$home/.config/rd/providers/anthropic.env"
+
+  output="$(run_auth "$home" <<< "sk-ant-oat01-EXAMPLEsk-ant-oat01-EXAMPLEsk-ant-oat01-EXA")"
+  grep -qx 'export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-EXAMPLE' \
+    "$home/.config/rd/providers/anthropic.env"
+  # setup-token prints the token itself; rd-auth's confirmation must not.
+  [[ "$(grep 'received' <<< "$output")" == "   received sk-ant-oat01-E… (20 chars)" ]] || {
+    echo "unexpected confirmation: $(grep 'received' <<< "$output")" >&2
+    return 1
+  }
+}
+
+# First-run onboarding would otherwise stop every new session on a login
+# picker that ignores the provider's credentials.
+test_onboarding_is_marked_done() {
+  local home
+  command -v jq >/dev/null 2>&1 || { echo "  (skipped: no jq)"; return 0; }
+  home="$(auth_home onboarding anthropic)"
+  printf 'export ANTHROPIC_API_KEY=sk-ant-EXAMPLE\n' \
+    > "$home/.config/rd/providers/anthropic.env"
+  printf '{"userID": "x"}\n' > "$home/.claude.json"
+
+  run_auth "$home" >/dev/null
+
+  [[ "$(jq -r .hasCompletedOnboarding "$home/.claude.json")" == "true" ]]
+  [[ "$(jq -r .userID "$home/.claude.json")" == "x" ]]
+}
+
+test_anthropic_subscription_rejects_a_bad_paste() {
+  local home
+  home="$(auth_home badpaste anthropic)"
+  printf '# anthropic\n' > "$home/.config/rd/providers/anthropic.env"
+
+  if run_auth "$home" <<< "not-a-token" >/dev/null 2>&1; then
+    echo "rd-auth stored something that is not a Claude token" >&2
+    return 1
+  fi
+  ! grep -q CLAUDE_CODE_OAUTH_TOKEN "$home/.config/rd/providers/anthropic.env"
 }
 
 test_anthropic_api_key_needs_no_login() {
@@ -286,7 +338,7 @@ test_github_remote_uses_gh() {
 
   run_auth "$home" >/dev/null
 
-  grep -q -- "auth login --hostname github.example.com" "$home/gh-log"
+  grep -q -- "auth login --hostname github.example.com --git-protocol https --web" "$home/gh-log"
   grep -q -- "auth setup-git --hostname github.example.com" "$home/gh-log"
   [[ ! -f "$home/glab-log" ]]
 }
@@ -352,6 +404,9 @@ test_bedrock_sso_login
 test_bedrock_static_credential_needs_no_login
 test_bedrock_without_any_credential_fails
 test_anthropic_subscription_writes_oauth_token
+test_anthropic_subscription_keeps_one_token_from_a_repeated_paste
+test_onboarding_is_marked_done
+test_anthropic_subscription_rejects_a_bad_paste
 test_anthropic_api_key_needs_no_login
 test_provider_flag_overrides_the_default
 test_gitlab_credential_helper_is_host_scoped

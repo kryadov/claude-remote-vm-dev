@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Claude Code hook for rd sessions: records the conversation id and whether
+# Claude is mid-turn as tmux user options, so rd-restart can resume the right
+# conversation and refuse to kill a turn in progress.
+#
+#   rd-claude-hook session-start|prompt|stop|session-end   (hook JSON on stdin)
+#
+# `stop` also serves StopFailure: a turn that ended on an API error is over,
+# and leaving the state 'busy' would make rd-restart refuse for no reason.
+#
+# Installed by rd-claude through `claude --settings`, never globally. It prints
+# nothing — SessionStart/UserPromptSubmit hook output is injected into Claude's
+# context — and always exits 0, so a failure here can never block Claude.
+set -uo pipefail
+
+event="${1:-}"
+input="$(cat 2>/dev/null || true)"
+[[ -n "${TMUX_PANE:-}" ]] || exit 0
+
+set_option() {
+  tmux set-option -t "$TMUX_PANE" "$1" "$2" >/dev/null 2>&1 || true
+}
+
+set_state() {
+  set_option @rd_claude_state "$1"
+  set_option @rd_claude_state_at "$(date +%s)"
+}
+
+case "$event" in
+  session-start)
+    # rd-restart types this id into a shell, so only a plain id is accepted.
+    re='"session_id"[[:space:]]*:[[:space:]]*"([A-Za-z0-9-]+)"'
+    if [[ "$input" =~ $re ]]; then
+      set_option @rd_claude_session "${BASH_REMATCH[1]}"
+    fi
+    set_state idle
+    ;;
+  prompt) set_state busy ;;
+  stop) set_state idle ;;
+  session-end) set_state exited ;;
+esac
+exit 0

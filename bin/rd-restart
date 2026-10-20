@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# Restart a running session's Claude on the installed release and resume the
+# same conversation. The tmux session, worktree, branch and provider are kept.
+#
+#   rd-restart <project> [--session <name>] [--force] [--update]
+#
+# --update   run rd-update first (installs the latest release if needed)
+# --force    restart even if Claude is mid-turn or its state is unknown
+#
+# Exit 3 means "refused: busy or unknown state" — rd-tui uses it to offer
+# --force. The state comes from rd-claude-hook; sessions started before it
+# existed have none and need --force once.
+set -euo pipefail
+
+RD_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  echo "usage: rd-restart <project> [--session <name>] [--force] [--update]" >&2
+  exit 2
+}
+
+[[ $# -ge 1 ]] || usage
+PROJECT="$1"
+shift
+RD_SESSION="default"
+FORCE=0
+UPDATE=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --session)
+      [[ $# -ge 2 ]] || usage
+      RD_SESSION="$2"
+      shift 2
+      ;;
+    --force) FORCE=1; shift ;;
+    --update) UPDATE=1; shift ;;
+    *) usage ;;
+  esac
+done
+
+if [[ "$RD_SESSION" == "default" ]]; then
+  TARGET="claude-$PROJECT"
+  start_hint="rd-start $PROJECT"
+else
+  TARGET="claude-$PROJECT--$RD_SESSION"
+  start_hint="rd-start $PROJECT --session $RD_SESSION"
+fi
+
+if ! tmux has-session -t "=$TARGET" 2>/dev/null; then
+  echo "rd-restart: $PROJECT/$RD_SESSION is not running; start it with: $start_hint" >&2
+  exit 1
+fi
+
+tmux_option() {
+  tmux show-options -t "=$TARGET:" -qv "$1" 2>/dev/null || true
+}
+
+existing_project="$(tmux_option @rd_project)"
+existing_session="$(tmux_option @rd_session)"
+if [[ "$RD_SESSION" == "default" ]]; then
+  if [[ -n "$existing_project" && ( "$existing_project" != "$PROJECT" || "${existing_session:-default}" != "default" ) ]]; then
+    echo "rd-restart: tmux name collision: '$TARGET' belongs to $existing_project/${existing_session:-default}" >&2
+    exit 1
+  fi
+elif [[ "$existing_project" != "$PROJECT" || "$existing_session" != "$RD_SESSION" ]]; then
+  echo "rd-restart: tmux name collision: '$TARGET' is not $PROJECT/$RD_SESSION" >&2
+  exit 1
+fi
+
+if [[ "$UPDATE" -eq 1 ]]; then
+  "$RD_BIN/rd-update"
+fi
+
+state="$(tmux_option @rd_claude_state)"
+case "$state" in
+  idle|exited) ;;
+  *)
+    if [[ "$FORCE" -eq 0 ]]; then
+      if [[ "$state" == "busy" ]]; then
+        since="$(tmux_option @rd_claude_state_at)"
+        age=""
+        if [[ "$since" =~ ^[0-9]+$ ]]; then
+          age=" for $(( ($(date +%s) - since) / 60 )) min"
+        fi
+        echo "rd-restart: Claude in $PROJECT/$RD_SESSION is busy$age (a turn is in progress)." >&2
+        echo "            An interrupted turn (Esc) also stays 'busy' until the next prompt finishes." >&2
+      else
+        echo "rd-restart: Claude's state in $PROJECT/$RD_SESSION is unknown: no hook has reported yet." >&2
+        echo "            Claude may still be on a first-run or login screen, or the session" >&2
+        echo "            was started before rd-restart existed." >&2
+      fi
+      echo "            Attach and check, then re-run with --force." >&2
+      exit 3
+    fi
+    ;;
+esac
+
+worktree="$(tmux_option @rd_worktree)"
+if [[ -z "$worktree" || ! -d "$worktree" ]]; then
+  worktree="$(tmux display-message -t "=$TARGET:" -p '#{pane_current_path}' 2>/dev/null || true)"
+fi
+
+# --resume needs the transcript to exist. A legacy session has no recorded id:
+# --continue (latest conversation in this worktree) is the best guess, but only
+# if there is one — otherwise Claude prints "No conversation found" and exits.
+# Claude keeps a worktree's transcripts in projects/<path, non-alnum -> '-'>.
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+session_id="$(tmux_option @rd_claude_session)"
+resume=()
+if [[ -z "$session_id" ]]; then
+  if [[ -n "$worktree" ]] && compgen -G "$CLAUDE_DIR/projects/${worktree//[^A-Za-z0-9]/-}/*.jsonl" >/dev/null; then
+    resume=(--continue)
+  fi
+elif [[ "$session_id" =~ ^[A-Za-z0-9-]+$ ]] &&
+     compgen -G "$CLAUDE_DIR/projects/*/$session_id.jsonl" >/dev/null; then
+  resume=(--resume "$session_id")
+else
+  echo "rd-restart: warning: conversation $session_id has no transcript; starting a new one." >&2
+fi
+
+# respawn-pane keeps the pane id and the session environment, so a provider
+# injected by rd-start --provider reaches the new login shell unchanged.
+pane="$(tmux_option @rd_claude_pane)"
+respawn=(-k)
+[[ -n "$worktree" && -d "$worktree" ]] && respawn+=(-c "$worktree")
+if [[ -z "$pane" ]] || ! tmux respawn-pane -t "$pane" "${respawn[@]}" 2>/dev/null; then
+  pane="=$TARGET:"
+  tmux respawn-pane -t "$pane" "${respawn[@]}"
+fi
+tmux set-option -t "=$TARGET:" @rd_claude_state ""
+
+printf -v launch '%q ' "$RD_BIN/rd-claude" ${resume[@]+"${resume[@]}"}
+tmux send-keys -t "$pane" "${launch% }" C-m
+
+# rd-claude records the version once the new Claude is up; set it now too, so
+# a listing taken right after this (rd-tui refreshes at once) is not stale.
+version="$(claude --version 2>/dev/null | awk 'NR == 1 { print $1 }' || true)"
+tmux set-option -t "=$TARGET:" @rd_claude_version "$version"
+echo "Restarted $PROJECT/$RD_SESSION on Claude ${version:-<unknown>} (${resume[*]:-new conversation})."

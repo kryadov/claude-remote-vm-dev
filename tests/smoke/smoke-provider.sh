@@ -19,11 +19,19 @@ mkdir -p "$SMOKE"
 # On a provisioned VM this runs from a login shell that already exports the
 # VM's provider. The private tmux server would inherit it, and ~/.profile
 # honours an inherited RD_PROVIDER — so start from a provider-free env.
-unset RD_PROVIDER CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_BEDROCK \
+unset RD_PROVIDER CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_FOUNDRY \
+  CLAUDE_CODE_USE_ANTHROPIC_AWS CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD \
+  CLAUDE_CODE_USE_MANTLE CLAUDE_CODE_USE_GATEWAY \
   ANTHROPIC_VERTEX_PROJECT_ID CLOUD_ML_REGION ANTHROPIC_API_KEY \
   CLAUDE_CODE_OAUTH_TOKEN AWS_REGION AWS_PROFILE AWS_BEARER_TOKEN_BEDROCK \
   AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
-  ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL
+  ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL \
+  ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ENABLE_TOOL_SEARCH \
+  CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY CLAUDE_CODE_MAX_CONTEXT_TOKENS
+# Inside tmux — and a Claude session on the VM is — $TMUX points every tmux
+# command at the CALLER's server whatever TMUX_TMPDIR says, and teardown runs
+# kill-server. Forget it, so the private server below is the only one touched.
+unset TMUX TMUX_PANE
 
 export HOME="$SMOKE/home"
 export TMUX_TMPDIR="$SMOKE/tmux"          # private tmux server
@@ -73,25 +81,25 @@ cat > "$HOME/.config/rd/providers/anthropic.env" <<'EOF'
 # Written by bootstrap.sh from rd.env — edit rd.env and re-run.
 export ANTHROPIC_API_KEY=sk-ant-SMOKE
 EOF
+cat > "$HOME/.config/rd/providers/gateway.env" <<'EOF'
+# Written by bootstrap.sh from rd.env — edit rd.env and re-run.
+export ANTHROPIC_BASE_URL='https://gateway.example.invalid'
+export ANTHROPIC_AUTH_TOKEN='sk-gw-SMOKE'
+export ENABLE_TOOL_SEARCH='true'
+EOF
 chmod 600 "$HOME/.config/rd/providers"/*.env
 umask 022
 printf 'vertex\n' > "$HOME/.config/rd/provider"
 
-# The ~/.profile switch, including the migration sed pair.
-MARK_BEGIN="# >>> remote-dev provider >>>"
-MARK_END="# <<< remote-dev provider <<<"
-sed -i "/# >>> remote-dev vertex >>>/,/# <<< remote-dev vertex <<</d" "$HOME/.profile"
-sed -i "/$MARK_BEGIN/,/$MARK_END/d" "$HOME/.profile"
-cat >> "$HOME/.profile" <<EOF
-$MARK_BEGIN
-export PATH="\$HOME/.local/bin:\$PATH"
-RD_PROVIDER="\${RD_PROVIDER:-\$(cat "\$HOME/.config/rd/provider" 2>/dev/null || echo vertex)}"
-if [ -r "\$HOME/.config/rd/providers/\$RD_PROVIDER.env" ]; then
-  . "\$HOME/.config/rd/providers/\$RD_PROVIDER.env"
+# The ~/.profile switch, including the migration sed pair — taken from
+# bootstrap.sh itself (MARK_BEGIN= through its heredoc's EOF), so this test
+# cannot drift from the block bootstrap really writes.
+profile_switch="$(sed -n '/^MARK_BEGIN=/,/^EOF$/p' "$REPO/bootstrap.sh")"
+if [ -z "$profile_switch" ]; then
+  echo "could not find the ~/.profile switch in $REPO/bootstrap.sh" >&2
+  exit 1
 fi
-export RD_PROVIDER
-$MARK_END
-EOF
+eval "$profile_switch"
 
 echo
 echo "== 1. ~/.profile migration =="
@@ -101,20 +109,11 @@ check "exactly one 'remote-dev provider' block" \
   "[ \$(grep -c '>>> remote-dev provider >>>' $HOME/.profile) -eq 1 ]"
 check "legacy Vertex project id no longer exported" \
   "! grep -q legacy-project $HOME/.profile"
+check "the block clears provider variables before sourcing a file" \
+  "grep -q '^  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN' $HOME/.profile"
 
 # Re-running bootstrap's profile section must not duplicate the block.
-sed -i "/# >>> remote-dev vertex >>>/,/# <<< remote-dev vertex <<</d" "$HOME/.profile"
-sed -i "/$MARK_BEGIN/,/$MARK_END/d" "$HOME/.profile"
-cat >> "$HOME/.profile" <<EOF
-$MARK_BEGIN
-export PATH="\$HOME/.local/bin:\$PATH"
-RD_PROVIDER="\${RD_PROVIDER:-\$(cat "\$HOME/.config/rd/provider" 2>/dev/null || echo vertex)}"
-if [ -r "\$HOME/.config/rd/providers/\$RD_PROVIDER.env" ]; then
-  . "\$HOME/.config/rd/providers/\$RD_PROVIDER.env"
-fi
-export RD_PROVIDER
-$MARK_END
-EOF
+eval "$profile_switch"
 check "re-run stays idempotent (still one block)" \
   "[ \$(grep -c '>>> remote-dev provider >>>' $HOME/.profile) -eq 1 ]"
 check "provider files are 0600" \
@@ -204,7 +203,59 @@ check "after rd-restart: pane is back in the worktree" \
   "grep -qx 'PWD=$HOME/worktrees/demo/bed' $SMOKE/env-restarted.txt"
 
 echo
-echo "== 6. worktree isolation still holds =="
+echo "== 6. inherited provider state cannot pick or bend a session's provider =="
+# A tmux server started by hand from a login shell keeps that shell's provider
+# in its global environment: RD_PROVIDER plus whatever its file exported. Fake
+# one started from a Vertex shell, then move the VM default to the gateway the
+# way the README's "Removing a provider" does.
+tmux set-environment -g RD_PROVIDER vertex
+tmux set-environment -g CLAUDE_CODE_USE_VERTEX 1
+tmux set-environment -g ANTHROPIC_VERTEX_PROJECT_ID legacy-project
+tmux set-environment -g ANTHROPIC_API_KEY sk-ant-INHERITED
+tmux set-environment -g ANTHROPIC_DEFAULT_OPUS_MODEL us.anthropic.claude-opus-4-8
+tmux set-environment -g CLAUDE_CODE_USE_MANTLE 1
+printf 'gateway\n' > "$HOME/.config/rd/provider"
+rd-start demo --session gw >/dev/null
+pane_env claude-demo--gw "$SMOKE/env-gateway.txt" || echo "  (pane never answered)"
+check "new default: the session carries RD_PROVIDER=gateway" \
+  "tmux show-environment -t '=claude-demo--gw' RD_PROVIDER | grep -qx 'RD_PROVIDER=gateway'"
+check "new default: the pane runs the gateway, not the frozen vertex" \
+  "grep -qx 'RD_PROVIDER=gateway' $SMOKE/env-gateway.txt"
+check "gateway: ANTHROPIC_BASE_URL from the provider file" \
+  "grep -qx 'ANTHROPIC_BASE_URL=https://gateway.example.invalid' $SMOKE/env-gateway.txt"
+check "gateway: optional switch from the provider file" \
+  "grep -qx 'ENABLE_TOOL_SEARCH=true' $SMOKE/env-gateway.txt"
+check "gateway: inherited CLAUDE_CODE_USE_VERTEX is gone" \
+  "! grep -q '^CLAUDE_CODE_USE_VERTEX=' $SMOKE/env-gateway.txt"
+check "gateway: inherited Anthropic key is gone" \
+  "! grep -q '^ANTHROPIC_API_KEY=' $SMOKE/env-gateway.txt"
+check "gateway: inherited Bedrock model pin is gone" \
+  "! grep -q '^ANTHROPIC_DEFAULT_OPUS_MODEL=' $SMOKE/env-gateway.txt"
+check "gateway: an inherited switch for a newer provider is gone too" \
+  "! grep -q '^CLAUDE_CODE_USE_MANTLE=' $SMOKE/env-gateway.txt"
+check "gateway: the key stays out of the tmux session environment" \
+  "! tmux show-environment -t '=claude-demo--gw' 2>/dev/null | grep -q 'sk-gw-SMOKE'"
+
+# The other direction: a server started from a gateway shell must not send an
+# 'anthropic' session — and its key — to the gateway.
+tmux set-environment -g ANTHROPIC_BASE_URL https://leak.invalid
+tmux set-environment -g ANTHROPIC_AUTH_TOKEN sk-gw-LEAK
+rd-start demo --session api --provider anthropic >/dev/null
+pane_env claude-demo--api "$SMOKE/env-anthropic.txt" || echo "  (pane never answered)"
+check "anthropic: its own key from the provider file" \
+  "grep -qx 'ANTHROPIC_API_KEY=sk-ant-SMOKE' $SMOKE/env-anthropic.txt"
+check "anthropic: inherited gateway base URL is gone" \
+  "! grep -q '^ANTHROPIC_BASE_URL=' $SMOKE/env-anthropic.txt"
+check "anthropic: inherited gateway key is gone" \
+  "! grep -q '^ANTHROPIC_AUTH_TOKEN=' $SMOKE/env-anthropic.txt"
+for var in RD_PROVIDER CLAUDE_CODE_USE_VERTEX ANTHROPIC_VERTEX_PROJECT_ID ANTHROPIC_API_KEY \
+           ANTHROPIC_DEFAULT_OPUS_MODEL CLAUDE_CODE_USE_MANTLE ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN; do
+  tmux set-environment -g -u "$var"
+done
+printf 'vertex\n' > "$HOME/.config/rd/provider"
+
+echo
+echo "== 7. worktree isolation still holds =="
 check "named session got its own worktree" \
   "[ -d $HOME/worktrees/demo/bed ]"
 check "named session is on feature/bed" \

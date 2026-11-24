@@ -55,8 +55,26 @@ echo "Visit https://claude.example/oauth to authorize"
 echo "sk-ant-oat01-EXAMPLE"
 EOF
 
+# Records the command line and the config read from stdin (-K -) apart, since
+# a gateway key must reach curl through stdin only. Prints the HTTP status
+# rd-auth asks for with -w '%{http_code}': $HOME/curl-status, default 200.
+cat > "$TEST_ROOT/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$HOME/curl-argv"
+cat >> "$HOME/curl-stdin"
+status="$(cat "$HOME/curl-status" 2>/dev/null || echo 200)"
+printf '%s' "$status"
+# Like real curl when nothing answered: -w still prints 000, -S explains why.
+if [[ "$status" == 000 ]]; then
+  echo "curl: (6) Could not resolve host: gateway.example.com" >&2
+  exit 6
+fi
+EOF
+
 # Stores each `git config --global` key in its own file. Keys are flattened to
-# a safe filename so scoped keys (credential.https://host.helper) work too.
+# a safe filename so scoped keys (credential.https://host.helper) work too. A
+# file may hold several values, one per line, like a multi-valued key — and,
+# as in real git, a plain set cannot overwrite those.
 cat > "$TEST_ROOT/bin/git" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$HOME/git-log"
@@ -64,14 +82,29 @@ key_file() {
   printf '%s/.gitconfig-%s' "$HOME" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '-')"
 }
 if [[ "$1 $2 $3" == "config --global --get" ]]; then
-  cat "$(key_file "$4")" 2>/dev/null
-  exit $?
+  [[ -f "$(key_file "$4")" ]] || exit 1
+  tail -n 1 "$(key_file "$4")"
+  exit 0
+fi
+if [[ "$1 $2 $3" == "config --global --get-all" ]]; then
+  [[ -f "$(key_file "$4")" ]] || exit 1
+  cat "$(key_file "$4")"
+  exit 0
 fi
 if [[ "$1 $2 $3" == "config --global --unset" ]]; then
   rm -f "$(key_file "$4")"
   exit 0
 fi
+if [[ "$1 $2 $3" == "config --global --replace-all" ]]; then
+  printf '%s' "$4" > "$(key_file "$4").key"
+  printf '%s' "$5" > "$(key_file "$4")"
+  exit 0
+fi
 if [[ "$1 $2" == "config --global" ]]; then
+  if [[ -f "$(key_file "$3")" && "$(grep -c '' "$(key_file "$3")")" -gt 1 ]]; then
+    echo "error: cannot overwrite multiple values with a single value" >&2
+    exit 5
+  fi
   printf '%s' "$3" > "$(key_file "$3").key"
   printf '%s' "$4" > "$(key_file "$3")"
   exit 0
@@ -269,6 +302,155 @@ test_anthropic_api_key_needs_no_login() {
   [[ ! -f "$home/claude-log" ]]
 }
 
+# The file as bootstrap.sh writes it (values single-quoted). $2 replaces the
+# URL; the default's trailing slash is deliberate — rd-auth must not probe
+# "//v1/models".
+gateway_file() {
+  cat > "$1/.config/rd/providers/gateway.env" <<EOF
+# Written by bootstrap.sh from rd.env — edit rd.env and re-run.
+export ANTHROPIC_BASE_URL='${2:-https://gateway.example.com/}'
+export ANTHROPIC_AUTH_TOKEN='sk-gw-EXAMPLE'
+EOF
+}
+
+test_gateway_checks_the_key_without_exposing_it() {
+  local home output
+  home="$(auth_home gateway gateway)"
+  gateway_file "$home"
+
+  output="$(run_auth "$home" 2>&1)"
+
+  [[ "$output" == *"accepted the key"* ]]
+  grep -qx -- "-sS -o /dev/null -w %{http_code} --max-time 20 -K - https://gateway.example.com/v1/models" \
+    "$home/curl-argv"
+  # The key travels in curl's config on stdin, never as an argument (ps shows those).
+  if grep -q "sk-gw-EXAMPLE" "$home/curl-argv"; then
+    echo "the gateway key reached curl's command line" >&2
+    return 1
+  fi
+  grep -qx 'header = "Authorization: Bearer sk-gw-EXAMPLE"' "$home/curl-stdin"
+  # No other provider's login runs, and the forge and Git author steps still do.
+  [[ ! -f "$home/gcloud-log" && ! -f "$home/aws-log" && ! -f "$home/claude-log" ]]
+  [[ "$(git_value "$home" user.name)" == "Example Developer" ]]
+}
+
+# A refused key is worth a warning, not an abort: the forge login after it is
+# independent of the model provider.
+test_gateway_refusing_the_key_warns_but_continues() {
+  local home output
+  home="$(auth_home gateway-refused gateway)"
+  gateway_file "$home"
+  printf '401' > "$home/curl-status"
+
+  output="$(run_auth "$home" 2>&1)"
+
+  [[ "$output" == *"[warn]"*"answered 401"*"ANTHROPIC_AUTH_TOKEN"* ]]
+  [[ "$output" != *"accepted the key"* ]]
+  [[ "$(git_value "$home" user.name)" == "Example Developer" ]]
+}
+
+# A redirect (to https, or to an SSO login page) says nothing about the key.
+test_gateway_redirect_is_not_acceptance() {
+  local home output
+  home="$(auth_home gateway-redirect gateway)"
+  gateway_file "$home"
+  printf '302' > "$home/curl-status"
+
+  output="$(run_auth "$home" 2>&1)"
+
+  [[ "$output" == *"answered 302"* ]]
+  [[ "$output" != *"accepted the key"* ]]
+}
+
+# Nothing answered (DNS, egress, TLS): the key was never judged, so the warning
+# must not blame it — and curl's own reason must reach the user.
+test_gateway_unreachable_is_not_blamed_on_the_key() {
+  local home output
+  home="$(auth_home gateway-unreachable gateway)"
+  gateway_file "$home"
+  printf '000' > "$home/curl-status"
+
+  output="$(run_auth "$home" 2>&1)"
+
+  [[ "$output" == *"Could not resolve host"* ]]
+  [[ "$output" == *"no HTTP answer"*"not checked"* ]]
+  [[ "$output" != *"answered 000"* && "$output" != *"accepted the key"* ]]
+  [[ "$(git_value "$home" user.name)" == "Example Developer" ]]
+}
+
+# Without a token there is no key to accept, whatever the gateway answers.
+test_gateway_without_a_token_says_so() {
+  local home output
+  home="$(auth_home gateway-notoken gateway)"
+  printf "export ANTHROPIC_BASE_URL='https://gateway.example.com'\n" \
+    > "$home/.config/rd/providers/gateway.env"
+
+  output="$(run_auth "$home" 2>&1)"
+
+  [[ "$output" == *"no ANTHROPIC_AUTH_TOKEN"* ]]
+  [[ "$output" == *"answered 200 without a key"* ]]
+  [[ "$output" != *"accepted the key"* ]]
+  if grep -q Authorization "$home/curl-stdin"; then
+    echo "rd-auth sent an Authorization header with no token configured" >&2
+    return 1
+  fi
+}
+
+# curl would guess http:// and send the key in the clear; Claude cannot use
+# such a URL at all, so rd-auth refuses before any request.
+test_gateway_url_without_scheme_fails_before_sending_the_key() {
+  local home output
+  home="$(auth_home gateway-noscheme gateway)"
+  gateway_file "$home" "gateway.example.com"
+
+  if output="$(run_auth "$home" 2>&1)"; then
+    echo "rd-auth accepted a gateway URL with no scheme" >&2
+    return 1
+  fi
+  [[ "$output" == *"no scheme"* ]]
+  [[ ! -f "$home/curl-argv" ]]
+}
+
+test_gateway_plain_http_is_probed_with_a_warning() {
+  local home output
+  home="$(auth_home gateway-http gateway)"
+  gateway_file "$home" "http://gateway.internal:4000"
+
+  output="$(run_auth "$home" 2>&1)"
+
+  [[ "$output" == *"plain http"* ]]
+  grep -q -- "http://gateway.internal:4000/v1/models" "$home/curl-argv"
+}
+
+# A key holding ', " and \ survives bootstrap's quoting, rd-auth's unquoting
+# and curl's config syntax byte for byte.
+test_gateway_key_with_quotes_reaches_curl_exactly() {
+  local home
+  home="$(auth_home gateway-quotes gateway)"
+  cat > "$home/.config/rd/providers/gateway.env" <<'EOF'
+export ANTHROPIC_BASE_URL='https://gateway.example.com'
+export ANTHROPIC_AUTH_TOKEN='sk-gw-it'\''s"x\y'
+EOF
+
+  run_auth "$home" >/dev/null 2>&1
+
+  grep -qxF 'header = "Authorization: Bearer sk-gw-it'"'"'s\"x\\y"' "$home/curl-stdin"
+}
+
+test_gateway_without_base_url_fails() {
+  local home output
+  home="$(auth_home gateway-empty gateway)"
+  printf 'export ANTHROPIC_AUTH_TOKEN=sk-gw-EXAMPLE\n' \
+    > "$home/.config/rd/providers/gateway.env"
+
+  if output="$(run_auth "$home" 2>&1)"; then
+    echo "rd-auth accepted a gateway provider with no base URL" >&2
+    return 1
+  fi
+  [[ "$output" == *"ANTHROPIC_BASE_URL"* ]]
+  [[ ! -f "$home/curl-argv" ]]
+}
+
 test_provider_flag_overrides_the_default() {
   local home
   home="$(auth_home flag vertex)"
@@ -384,6 +566,34 @@ test_ambiguous_host_without_a_tty_fails() {
   [[ "$output" == *"--forge"* ]]
 }
 
+# glab's own git setup leaves an empty reset entry before its helper (here with
+# an absolute path). A plain `git config key value` exits 5 on such a key, and
+# set -e used to end rd-auth right there — before the Git author was set.
+test_existing_multi_valued_gitlab_helper_is_kept() {
+  local home key_file
+  home="$(auth_home multivalue vertex)"
+  key_file="$home/.gitconfig-$(printf '%s' 'credential.https://gitlab.example.com.helper' | tr -c 'A-Za-z0-9' '-')"
+  printf '\n%s' '!/usr/bin/glab auth git-credential' > "$key_file"
+
+  run_auth "$home" >/dev/null
+
+  [[ "$(cat "$key_file")" == $'\n!/usr/bin/glab auth git-credential' ]]
+  [[ "$(git_value "$home" user.name)" == "Example Developer" ]]
+}
+
+# Anything else on the key is replaced, as before.
+test_foreign_gitlab_helper_is_replaced() {
+  local home
+  home="$(auth_home foreignhelper vertex)"
+  printf '%s' 'store' \
+    > "$home/.gitconfig-$(printf '%s' 'credential.https://gitlab.example.com.helper' | tr -c 'A-Za-z0-9' '-')"
+
+  run_auth "$home" >/dev/null
+
+  [[ "$(git_value "$home" 'credential.https://gitlab.example.com.helper')" \
+     == '!glab auth git-credential' ]]
+}
+
 test_migrates_legacy_global_credential_helper() {
   local home
   home="$(auth_home legacy vertex)"
@@ -408,6 +618,15 @@ test_anthropic_subscription_keeps_one_token_from_a_repeated_paste
 test_onboarding_is_marked_done
 test_anthropic_subscription_rejects_a_bad_paste
 test_anthropic_api_key_needs_no_login
+test_gateway_checks_the_key_without_exposing_it
+test_gateway_refusing_the_key_warns_but_continues
+test_gateway_redirect_is_not_acceptance
+test_gateway_unreachable_is_not_blamed_on_the_key
+test_gateway_without_a_token_says_so
+test_gateway_url_without_scheme_fails_before_sending_the_key
+test_gateway_plain_http_is_probed_with_a_warning
+test_gateway_key_with_quotes_reaches_curl_exactly
+test_gateway_without_base_url_fails
 test_provider_flag_overrides_the_default
 test_gitlab_credential_helper_is_host_scoped
 test_existing_gitlab_login_is_detected_despite_another_broken_host
@@ -416,5 +635,7 @@ test_github_remote_uses_gh
 test_github_dot_com_is_detected_without_forge_key
 test_forge_flag_overrides_detection
 test_ambiguous_host_without_a_tty_fails
+test_existing_multi_valued_gitlab_helper_is_kept
+test_foreign_gitlab_helper_is_replaced
 test_migrates_legacy_global_credential_helper
 echo "rd-auth tests passed"

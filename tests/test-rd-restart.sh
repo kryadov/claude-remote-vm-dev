@@ -280,6 +280,31 @@ test_update_uses_claude_install_for_native_installs() {
   ! grep -q "^sudo" "$HOME_DIR/claude-stub/log"
 }
 
+# rd-start pins every session's provider; once that provider is removed (the
+# VM moved to another), a respawn would come back with none.
+test_restart_refuses_a_session_whose_provider_was_removed() {
+  local status=0 output
+  setup_case removedprovider
+  mkdir -p "$HOME_DIR/.config/rd/providers"
+  printf 'export ANTHROPIC_BASE_URL=x\n' > "$HOME_DIR/.config/rd/providers/vertex.env"
+  printf 'vertex\n' > "$HOME_DIR/.config/rd/provider"
+  rd rd-start demo >/dev/null
+  hook session-start "{\"session_id\": \"$ID\"}"
+  rm "$HOME_DIR/.config/rd/providers/vertex.env"
+
+  output="$(rd rd-restart demo --update 2>&1)" || status=$?
+
+  [[ "$status" -eq 1 ]] || { echo "expected exit 1, got $status" >&2; return 1; }
+  [[ "$output" == *"'vertex', which is no longer configured"* ]]
+  [[ "$output" == *"rd-stop demo; rd-start demo"* ]]
+  if grep -q '^respawn-pane' "$HOME_DIR/tmux-log"; then
+    echo "rd-restart respawned a session whose provider is gone" >&2
+    return 1
+  fi
+  # Refused before --update: nothing was installed.
+  [[ "$(cat "$HOME_DIR/claude-stub/version")" == "2.1.1" ]]
+}
+
 test_restart_update_installs_before_restarting() {
   setup_case chained
   rd rd-start demo >/dev/null
@@ -342,6 +367,7 @@ test_update_is_a_noop_when_current
 test_update_installs_latest_through_sudo_npm
 test_update_rolls_back_a_broken_release
 test_update_uses_claude_install_for_native_installs
+test_restart_refuses_a_session_whose_provider_was_removed
 test_restart_update_installs_before_restarting
 test_rd_list_reports_activity_version_and_outdated
 test_rd_list_keeps_columns_with_empty_provider

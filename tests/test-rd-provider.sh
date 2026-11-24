@@ -34,15 +34,15 @@ run_rd() {
 session_env() { cat "$1/tmux-state.claude-demo.env" 2>/dev/null || true; }
 session_option() { cat "$1/tmux-state.claude-demo.rd_provider" 2>/dev/null || true; }
 
-test_default_provider_is_recorded_without_env_injection() {
+test_default_provider_is_pinned_in_the_session() {
   local home
   home="$(new_home default)"
   run_rd "$home" rd-start demo >/dev/null
 
   [[ "$(session_option "$home")" == "vertex" ]]
-  # No --provider means the login shell reads the default file itself, so
-  # nothing needs to cross the tmux boundary.
-  [[ -z "$(session_env "$home")" ]]
+  # The default crosses the boundary too: an RD_PROVIDER frozen into the tmux
+  # server's global environment must not pick the pane's provider instead.
+  [[ "$(session_env "$home")" == "RD_PROVIDER=vertex" ]]
 }
 
 test_provider_override_crosses_the_tmux_boundary() {
@@ -126,7 +126,7 @@ test_rd_list_reports_the_provider() {
   [[ "$(cut -f7 <<< "$porcelain")" == "bedrock" ]]
 }
 
-test_default_provider_is_recorded_without_env_injection
+test_default_provider_is_pinned_in_the_session
 test_provider_override_crosses_the_tmux_boundary
 test_rejects_unconfigured_provider
 test_rejects_provider_change_on_running_session

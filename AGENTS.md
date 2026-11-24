@@ -7,15 +7,18 @@ Guidance for AI agents and contributors working in this repository.
 **claude-remote-dev**: tooling to run Claude Code sessions on a server-side VM
 inside the org perimeter, so sessions keep running while the laptop is off and
 you reconnect to review, answer questions, and manage them. Models are reached
-through **one of three providers** — GCP Vertex AI (user ADC, no
-service-account keys), Amazon Bedrock, or the direct Anthropic API — chosen per
-VM in `rd.env` and overridable per session with `rd-start --provider`.
+through **one of four providers** — GCP Vertex AI (user ADC, no
+service-account keys), Amazon Bedrock, the direct Anthropic API, or an
+Anthropic-compatible LLM gateway such as LiteLLM (`ANTHROPIC_BASE_URL` plus a
+bearer key) — chosen per VM in `rd.env` and overridable per session with
+`rd-start --provider`.
 
 The full rationale and decisions live in
 `docs/superpowers/specs/2026-08-15-remote-claude-code-vm-design.md`, extended by
 `docs/superpowers/specs/2026-08-15-github-and-multi-provider-design.md` (GitHub
-alongside GitLab, Bedrock/Anthropic alongside Vertex). Read them before changing
-the architecture.
+alongside GitLab, Bedrock/Anthropic alongside Vertex) and
+`docs/superpowers/specs/2026-11-24-llm-gateway-provider-design.md` (the gateway
+provider). Read them before changing the architecture.
 
 ## Architecture in one paragraph
 
@@ -54,10 +57,24 @@ from Git Bash on Windows).
 - **Model providers** live one-per-file in `~/.config/rd/providers/<name>.env`
   (mode 0600), with the VM default in `~/.config/rd/provider`. `~/.profile`
   sources exactly one of them — tmux panes are login shells, which is what makes
-  this work. `rd-start --provider` overrides it by passing **only the provider
-  name** through `tmux new-session -e RD_PROVIDER=…`.
+  this work. `rd-start` names each new session's provider — the `--provider`
+  flag or the VM default — by passing **only the provider name** through
+  `tmux new-session -e RD_PROVIDER=…`, so an `RD_PROVIDER` frozen into the tmux
+  server's global environment (a server started from a login shell) cannot
+  pick it instead. Before sourcing the named file, `~/.profile` unsets every
+  provider switch and credential Claude reads (all seven `CLAUDE_CODE_USE_*`
+  provider switches, Anthropic and gateway credentials,
+  `AWS_BEARER_TOKEN_BEDROCK`, gateway switches, model pins): the switches win
+  over `ANTHROPIC_BASE_URL`, and a key inherited from one provider must never
+  reach another. General AWS credentials (`AWS_PROFILE`, `AWS_REGION`, the key
+  pair) and gcloud are not touched. It runs in every login shell, so it also
+  drops a user's own `~/.bashrc` exports of those names there (the README says
+  so) — the shell cannot tell an inherited value from a chosen one. `rd-restart`
+  refuses a session whose `@rd_provider` file is gone, since the respawn would
+  come back with no provider.
 - **`rd-auth` is the single authorization entrypoint** on the VM: the model
-  provider (Vertex ADC / `aws sso login` / `claude setup-token`), the forge
+  provider (Vertex ADC / `aws sso login` / `claude setup-token` / a check that
+  the gateway accepts its key, fed to `curl` on stdin), the forge
   login (`glab auth login` or `gh auth login` + `gh auth setup-git`), the
   host-scoped credential helper, and `git user.name/user.email` (read from
   `rd.env`; it exits if they are unset, so VM commits are never attributed to
@@ -173,7 +190,9 @@ There is no compiler; validation is static + a live smoke test on a VM.
 - TUI tests: `bash tests/test-rd-tui.sh` (drives `rd-tui` by piping keystrokes;
   `\033[B` is arrow-down, an empty line is enter).
 - Auth tests: `bash tests/test-rd-auth.sh` (stubs `gcloud`/`glab`/`gh`/`aws`/
-  `claude`/`git`) — covers every provider and forge path.
+  `claude`/`git`/`curl`) — covers every provider and forge path. On Git Bash
+  over NTFS the 0600 mode assertions fail (`chmod` cannot set them there); the
+  suite is meant for Linux.
 - Provider tests: `bash tests/test-rd-provider.sh` (`rd-start --provider`
   resolution, the tmux `-e` injection, and the `rd-list` provider column).
 - Restart/update tests: `bash tests/test-rd-restart.sh` (hook state machine,
@@ -189,11 +208,15 @@ There is no compiler; validation is static + a live smoke test on a VM.
   against a temp `HOME`; they must never touch a real VM or the user's tmux.
 - Provider smoke (real tmux, real login shell, real worktree — proves the
   `~/.profile` + `tmux -e RD_PROVIDER` mechanism the stubs cannot):
-  `bash tests/smoke/smoke-provider.sh .`
+  `bash tests/smoke/smoke-provider.sh .` It evaluates the `~/.profile` block
+  straight out of `bootstrap.sh`, and unsets `TMUX` first: inside tmux every
+  tmux command would otherwise hit the caller's server, teardown's
+  `kill-server` included.
 - `bootstrap.sh` smoke, in a throwaway container only:
   `docker run --rm -v "$(pwd)":/src -w /work ubuntu:24.04 bash -c 'cp -r /src/. /work/ && bash /work/tests/smoke/smoke-bootstrap.sh'`
-  It checks the installs, provider files, the `~/.profile` migration and
-  idempotency. `loginctl`/`systemctl --user` cannot work in a container and end
+  It checks the installs, provider files (the gateway's included), the
+  `~/.profile` migration, that a native `claude` in `~/.local/bin` gets no
+  npm-global twin, and idempotency. `loginctl`/`systemctl --user` cannot work in a container and end
   the run at that section — expected, not a failure.
 - **Smoke test** (the real gate) — on a throwaway VM: run `bootstrap-remote.sh`,
   verify `node`/`claude`/`gcloud`/`glab`/`docker` versions, run `rd-auth`, start
@@ -241,6 +264,30 @@ There is no compiler; validation is static + a live smoke test on a VM.
   last release that has a platform package:
   `npm view @anthropic-ai/claude-code-linux-x64 versions`, then
   `sudo npm install -g @anthropic-ai/claude-code@<version>`.
+- **A native Claude is invisible over plain ssh.** `claude install` puts the
+  binary in `~/.local/bin`, which a non-login `ssh host cmd` shell — the way
+  `bootstrap-remote.sh` runs `bootstrap.sh` — does not have on PATH. Bootstrap
+  then npm-installed a second, root-owned copy that every login shell shadows,
+  and `rd-update` updated that copy and rolled back. `bootstrap.sh` now
+  prepends `~/.local/bin` itself; anything else scripted over ssh needs the
+  same, or `bash -lc`. A VM that already has the twin keeps it: when
+  `readlink -f ~/.local/bin/claude` points into `~/.local/share/claude`, remove
+  it with `sudo npm uninstall -g @anthropic-ai/claude-code`.
+- **glab writes its own git helper, with a reset entry.** Its setup leaves
+  `credential.<host>.helper` holding an empty value and then
+  `!/usr/bin/glab auth git-credential`. A plain `git config --global key value`
+  on such a key exits 5 ("cannot overwrite multiple values"), and `rd-auth`
+  died there before setting the Git author. It now keeps any glab helper it
+  finds and replaces anything else with `--replace-all`.
+- **A Vertex model id in a settings pin breaks a gateway.**
+  `ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5@20251001` is a Vertex id; a
+  LiteLLM gateway answers 400 "no healthy deployments", so every Haiku call —
+  titles, summaries, Haiku subagents — fails with nothing on screen. When a
+  VM or a laptop moves to a gateway, check the pins in `~/.claude/settings.json`
+  against the gateway's `/v1/models`.
+- **`claude -p` in `ssh host bash -s <<'EOF'` eats the rest of the script.**
+  `claude -p` appends piped stdin to its prompt, and under `bash -s` that stdin
+  is every line after it — they never run. Give it `< /dev/null`.
 - **Bridging a VM over Wi-Fi destroys throughput** (802.11 forbids a station
   sending foreign MAC addresses; the hypervisor fakes it). Symptom: normal
   latency and zero packet loss, but ~10 KB/s to the internet while the LAN runs

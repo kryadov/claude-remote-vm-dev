@@ -243,9 +243,12 @@ if [[ "$TMUX_EXISTS" -eq 1 ]]; then
   exit 0
 fi
 
-# Without --provider the login shell picks the default up from
-# ~/.config/rd/provider on its own, so nothing has to cross the boundary.
-if [[ "$PROVIDER_EXPLICIT" -eq 1 ]]; then
+# The session carries its provider's name even when it is the VM default: a
+# tmux server started from a login shell holds that shell's RD_PROVIDER in its
+# global environment, and ~/.profile would honour it over the default file —
+# leaving the pane on another provider than @rd_provider says. No provider at
+# all (a VM provisioned before provider files) means nothing to pass.
+if [[ -n "$PROVIDER" ]]; then
   tmux new-session -d -s "$TMUX_SESSION" -c "$WORKDIR" -e RD_PROVIDER="$PROVIDER"
 else
   tmux new-session -d -s "$TMUX_SESSION" -c "$WORKDIR"

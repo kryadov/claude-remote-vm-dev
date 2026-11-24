@@ -57,6 +57,9 @@ AWS_REGION="eu-central-1"
 AWS_PROFILE="smoke-sso"
 ANTHROPIC_DEFAULT_OPUS_MODEL="us.anthropic.claude-opus-4-8"
 ANTHROPIC_API_KEY="sk-ant-SMOKE"
+ANTHROPIC_BASE_URL="https://gateway.example.invalid"
+ANTHROPIC_AUTH_TOKEN='sk-gw-SMOKE&$$x'
+ENABLE_TOOL_SEARCH="true"
 GIT_USER_NAME="Smoke Tester"
 GIT_USER_EMAIL="smoke@example.invalid"
 EOF
@@ -94,6 +97,23 @@ check "bedrock.env carries the model pin" \
   "grep -q 'ANTHROPIC_DEFAULT_OPUS_MODEL=' /root/.config/rd/providers/bedrock.env"
 check "anthropic.env written from ANTHROPIC_API_KEY" \
   "grep -q 'ANTHROPIC_API_KEY=sk-ant-SMOKE' /root/.config/rd/providers/anthropic.env"
+# The key holds characters the shell would act on ($$ is its PID, & forks), so
+# the expected lines live in variables and the checks use single quotes.
+GW_TOKEN='sk-gw-SMOKE&$$x'
+# shellcheck disable=SC2034  # read inside check's eval
+GW_TOKEN_LINE="export ANTHROPIC_AUTH_TOKEN='$GW_TOKEN'"
+check "gateway.env written from ANTHROPIC_BASE_URL, single-quoted" \
+  "grep -qx \"export ANTHROPIC_BASE_URL='https://gateway.example.invalid'\" /root/.config/rd/providers/gateway.env"
+check "gateway.env carries the gateway key, single-quoted" \
+  'grep -qxF -- "$GW_TOKEN_LINE" /root/.config/rd/providers/gateway.env'
+check "gateway.env writes an optional switch that is set" \
+  "grep -qx \"export ENABLE_TOOL_SEARCH='true'\" /root/.config/rd/providers/gateway.env"
+check "gateway.env leaves out optional switches that are not" \
+  "! grep -q 'CLAUDE_CODE_MAX_CONTEXT_TOKENS' /root/.config/rd/providers/gateway.env"
+check "gateway.env holds nothing but its exports (clearing is ~/.profile's job)" \
+  "! grep -v -e '^#' -e '^export ' /root/.config/rd/providers/gateway.env | grep -q ."
+check "gateway.env is 0600" \
+  "[ \$(stat -c '%a' /root/.config/rd/providers/gateway.env) = 600 ]"
 check "provider files are 0600" \
   "[ \$(stat -c '%a' /root/.config/rd/providers/bedrock.env) = 600 ]"
 check "default provider is RD_PROVIDER from rd.env" \
@@ -102,6 +122,8 @@ check "legacy 'remote-dev vertex' block removed from ~/.profile" \
   "! grep -q 'remote-dev vertex' /root/.profile"
 check "exactly one 'remote-dev provider' block" \
   "[ \$(grep -c '>>> remote-dev provider >>>' /root/.profile) -eq 1 ]"
+check "the block clears provider variables before sourcing a file" \
+  "grep -q '^  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN' /root/.profile"
 check "rd-* helpers installed to ~/.local/bin" \
   "[ -x /root/.local/bin/rd-start ] && [ -x /root/.local/bin/rd-auth ]"
 check "gh installed" "command -v gh"
@@ -120,12 +142,59 @@ check "login shell does NOT export Vertex vars" \
 env -i HOME=/root RD_PROVIDER=anthropic bash -lc 'env' > /tmp/login-env2.txt 2>/dev/null
 check "a preset RD_PROVIDER wins (the rd-start override path)" \
   "grep -qx 'ANTHROPIC_API_KEY=sk-ant-SMOKE' /tmp/login-env2.txt"
+# A pane can inherit another provider's state (tmux server env, ~/.bashrc):
+# a Vertex switch, an Anthropic key, a Bedrock model pin. None may survive
+# into a gateway session...
+env -i HOME=/root RD_PROVIDER=gateway CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_API_KEY=sk-ant-INHERITED \
+  ANTHROPIC_DEFAULT_OPUS_MODEL=us.anthropic.claude-opus-4-8 \
+  bash -lc 'env' > /tmp/login-env3.txt 2>/dev/null
+check "gateway login shell exports the gateway's base URL" \
+  "grep -qx 'ANTHROPIC_BASE_URL=https://gateway.example.invalid' /tmp/login-env3.txt"
+check "gateway login shell gets the key byte for byte" \
+  'grep -qxF -- "ANTHROPIC_AUTH_TOKEN=$GW_TOKEN" /tmp/login-env3.txt'
+check "gateway login shell drops an inherited Vertex switch" \
+  "! grep -q '^CLAUDE_CODE_USE_VERTEX=' /tmp/login-env3.txt"
+check "gateway login shell drops an inherited Anthropic key" \
+  "! grep -q '^ANTHROPIC_API_KEY=' /tmp/login-env3.txt"
+check "gateway login shell drops an inherited Bedrock model pin" \
+  "! grep -q '^ANTHROPIC_DEFAULT_OPUS_MODEL=' /tmp/login-env3.txt"
+# ...and a gateway's base URL and key may not bend an 'anthropic' session.
+env -i HOME=/root RD_PROVIDER=anthropic ANTHROPIC_BASE_URL=https://leak.invalid \
+  ANTHROPIC_AUTH_TOKEN=sk-gw-LEAK bash -lc 'env' > /tmp/login-env4.txt 2>/dev/null
+check "anthropic login shell keeps its own key" \
+  "grep -qx 'ANTHROPIC_API_KEY=sk-ant-SMOKE' /tmp/login-env4.txt"
+check "anthropic login shell drops an inherited gateway URL and key" \
+  "! grep -q -e '^ANTHROPIC_BASE_URL=' -e '^ANTHROPIC_AUTH_TOKEN=' /tmp/login-env4.txt"
+
+echo
+echo "--- a native claude in ~/.local/bin, unseen by this shell's PATH ---"
+# bootstrap-remote.sh runs bootstrap over plain `ssh host cmd`, whose PATH
+# lacks ~/.local/bin — like this script's. A native install lives there and
+# must not get an npm-global twin on the next run.
+npm uninstall -g @anthropic-ai/claude-code >/dev/null 2>&1
+mkdir -p /root/.local/bin
+cat > /root/.local/bin/claude <<'EOF'
+#!/bin/sh
+case "$1" in
+  --version) echo "2.1.999 (Claude Code)" ;;
+  plugin) echo "atlassian@claude-plugins-official" ;;
+esac
+exit 0
+EOF
+chmod +x /root/.local/bin/claude
 
 echo
 echo "=================== bootstrap.sh run 2 (idempotency) ==================="
 ./bootstrap.sh >/tmp/run2.log 2>&1
 echo "bootstrap exit: $?"
 tail -5 /tmp/run2.log
+# The two absences below would also hold if run 2 died before the Claude step.
+check "run 2 got past the Claude step" \
+  "grep -q 'Provider config in ~/.config/rd' /tmp/run2.log"
+check "native claude in ~/.local/bin: run 2 skipped the npm install" \
+  "! grep -q 'Claude Code CLI (npm global)' /tmp/run2.log"
+check "native claude in ~/.local/bin: no npm-global copy appeared" \
+  "! npm ls -g --depth=0 @anthropic-ai/claude-code"
 check "still exactly one 'remote-dev provider' block after re-run" \
   "[ \$(grep -c '>>> remote-dev provider >>>' /root/.profile) -eq 1 ]"
 check "no duplicated github-cli apt source" \

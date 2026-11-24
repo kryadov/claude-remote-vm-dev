@@ -11,6 +11,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# bootstrap-remote.sh runs this over plain `ssh host cmd`: a non-login shell
+# whose PATH lacks ~/.local/bin, where a native Claude install (`claude
+# install`) lives. Unseen, it would get a second, npm-global copy below — one
+# every login shell shadows, and the one rd-update would then try to update.
+export PATH="$HOME/.local/bin:$PATH"
 log()  { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
 
@@ -150,6 +155,14 @@ write_provider() {
   echo "   provider '$name' configured"
 }
 
+# Single-quotes a value for a provider file, which login shells source: a key
+# such as sk-a&b$c must reach the shell — and rd-auth — unchanged. The
+# replacement is quoted because bash 5.2 rewrites backslashes in an unquoted one.
+shell_quote() {
+  local escaped="'\\''"
+  printf "'%s'" "${1//\'/"$escaped"}"
+}
+
 if [[ -n "${GCP_PROJECT_ID:-}" ]]; then
   write_provider vertex \
     "export CLAUDE_CODE_USE_VERTEX=1" \
@@ -191,6 +204,25 @@ elif [[ "$RD_PROVIDER" == "anthropic" && ! -f "$PROVIDER_DIR/anthropic.env" ]]; 
   write_provider anthropic "# rd-auth adds CLAUDE_CODE_OAUTH_TOKEN here."
 fi
 
+# An Anthropic-compatible LLM gateway (LiteLLM and the like): a base URL plus
+# the gateway's own key, which Claude sends as "Authorization: Bearer".
+# Whatever a pane inherited from another provider is cleared by ~/.profile
+# before this file is sourced (see the provider switch below).
+if [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then
+  gateway_lines=("export ANTHROPIC_BASE_URL=$(shell_quote "$ANTHROPIC_BASE_URL")")
+  if [[ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
+    gateway_lines+=("export ANTHROPIC_AUTH_TOKEN=$(shell_quote "$ANTHROPIC_AUTH_TOKEN")")
+  fi
+  # Optional switches a gateway usually wants, written only when set.
+  for gateway_var in ENABLE_TOOL_SEARCH CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY \
+                     CLAUDE_CODE_MAX_CONTEXT_TOKENS; do
+    if [[ -n "${!gateway_var:-}" ]]; then
+      gateway_lines+=("export $gateway_var=$(shell_quote "${!gateway_var}")")
+    fi
+  done
+  write_provider gateway "${gateway_lines[@]}"
+fi
+
 if [[ ! -r "$PROVIDER_DIR/$RD_PROVIDER.env" ]]; then
   warn "Default provider '$RD_PROVIDER' has no config — set its values in rd.env and re-run."
 fi
@@ -208,9 +240,20 @@ cat >> "$HOME/.profile" <<EOF
 $MARK_BEGIN
 export PATH="\$HOME/.local/bin:\$PATH"
 # tmux starts panes as login shells, so this is where a session picks up its
-# model provider. rd-start overrides it with: tmux new-session -e RD_PROVIDER=...
+# model provider. rd-start names it with: tmux new-session -e RD_PROVIDER=...
 RD_PROVIDER="\${RD_PROVIDER:-\$(cat "\$HOME/.config/rd/provider" 2>/dev/null || echo vertex)}"
 if [ -r "\$HOME/.config/rd/providers/\$RD_PROVIDER.env" ]; then
+  # Exactly one provider: drop every provider switch and credential Claude
+  # reads, whatever this shell inherited (a tmux server started by hand holds
+  # its shell's) or ~/.bashrc exported, then load the selected file. General
+  # AWS credentials (AWS_PROFILE, AWS_REGION, the key pair) and gcloud stay.
+  unset CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_FOUNDRY
+  unset CLAUDE_CODE_USE_ANTHROPIC_AWS CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD
+  unset CLAUDE_CODE_USE_MANTLE CLAUDE_CODE_USE_GATEWAY AWS_BEARER_TOKEN_BEDROCK
+  unset ANTHROPIC_VERTEX_PROJECT_ID CLOUD_ML_REGION ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
+  unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ENABLE_TOOL_SEARCH
+  unset CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY CLAUDE_CODE_MAX_CONTEXT_TOKENS
+  unset ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL
   . "\$HOME/.config/rd/providers/\$RD_PROVIDER.env"
 fi
 export RD_PROVIDER

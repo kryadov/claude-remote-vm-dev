@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # One-time authorizations for a remote-dev VM, in one command:
-#   model provider (Vertex ADC | Bedrock | Anthropic) + forge (glab | gh)
-#   + Git author + Jira reminder.
+#   model provider (Vertex ADC | Bedrock | Anthropic | LLM gateway)
+#   + forge (glab | gh) + Git author + Jira reminder.
 #
-# Usage: rd-auth [--provider vertex|bedrock|anthropic] [--forge gitlab|github] [<forge-host>]
+# Usage: rd-auth [--provider vertex|bedrock|anthropic|gateway] [--forge gitlab|github] [<forge-host>]
 #
 # The provider defaults to ~/.config/rd/provider (written by bootstrap.sh from
 # RD_PROVIDER in rd.env); the forge is inferred from REPO_URL unless FORGE says
@@ -12,7 +12,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: rd-auth [--provider vertex|bedrock|anthropic] [--forge gitlab|github] [<forge-host>]" >&2
+  echo "usage: rd-auth [--provider vertex|bedrock|anthropic|gateway] [--forge gitlab|github] [<forge-host>]" >&2
   exit 2
 }
 
@@ -88,12 +88,14 @@ provider_has() {
     grep -qE "^[[:space:]]*(export[[:space:]]+)?$1=" "$PROVIDER_FILE"
 }
 provider_value() {
-  local value
+  local value escaped="'\\''"
   value="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" "$PROVIDER_FILE" \
     | head -1 | cut -d= -f2-)"
   value="${value%$'\r'}"
   case "$value" in
-    \"*\"|\'*\') value="${value:1:${#value}-2}" ;;
+    # bootstrap.sh single-quotes gateway values, spelling each ' as '\''.
+    \'*\') value="${value:1:${#value}-2}"; value="${value//"$escaped"/\'}" ;;
+    \"*\") value="${value:1:${#value}-2}" ;;
   esac
   printf '%s' "$value"
 }
@@ -155,8 +157,66 @@ case "$PROVIDER" in
       echo "   OAuth token stored in $PROVIDER_FILE (0600) ✓"
     fi
     ;;
+  gateway)
+    if ! provider_has ANTHROPIC_BASE_URL; then
+      echo "rd-auth: $PROVIDER_FILE has no ANTHROPIC_BASE_URL. Set it and" >&2
+      echo "         ANTHROPIC_AUTH_TOKEN in rd.env and re-run bootstrap.sh." >&2
+      exit 1
+    fi
+    gateway_url="$(provider_value ANTHROPIC_BASE_URL)"
+    case "$gateway_url" in
+      https://*) ;;
+      http://*)
+        echo "   [warn] $gateway_url is plain http: the key and every prompt cross the network unencrypted." >&2
+        ;;
+      *)
+        # curl would guess http:// and send the key in the clear, and Claude
+        # cannot use such a URL at all.
+        echo "rd-auth: ANTHROPIC_BASE_URL '$gateway_url' has no scheme (expected https://…)." >&2
+        echo "         Fix it in rd.env and re-run bootstrap.sh." >&2
+        exit 1
+        ;;
+    esac
+    # A gateway key is static, so there is nothing to log in to — check that
+    # the gateway accepts it instead. curl reads the header from stdin (-K -),
+    # so the key never appears on a command line; inside curl's "…" a backslash
+    # and a double quote have to be escaped.
+    gateway_probe="${gateway_url%/}/v1/models"
+    gateway_config=""
+    if provider_has ANTHROPIC_AUTH_TOKEN; then
+      gateway_token="$(provider_value ANTHROPIC_AUTH_TOKEN)"
+      bs='\' dq='"'
+      gateway_token="${gateway_token//"$bs"/"$bs$bs"}"
+      gateway_token="${gateway_token//"$dq"/"$bs$dq"}"
+      gateway_config="header = \"Authorization: Bearer $gateway_token\""
+    else
+      echo "   [warn] $PROVIDER_FILE has no ANTHROPIC_AUTH_TOKEN: Claude will send the gateway no key." >&2
+    fi
+    # Only a 2xx counts: a redirect — to https, or to an SSO login page —
+    # proves nothing about the key. curl's own error (-S) explains a failure
+    # to connect, after which -w reports 000.
+    gateway_status="$(printf '%s\n' "$gateway_config" \
+      | curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -K - "$gateway_probe")" || true
+    case "$gateway_status" in
+      2??)
+        if [[ -n "$gateway_config" ]]; then
+          echo "   Gateway $gateway_url accepted the key ✓"
+        else
+          echo "   Gateway $gateway_url answered $gateway_status without a key"
+        fi
+        ;;
+      000|"")
+        echo "   [warn] no HTTP answer from $gateway_probe (curl's error above), so the key was not checked;" >&2
+        echo "          check that the VM can resolve, reach and trust it (DNS, egress, TLS)." >&2
+        ;;
+      *)
+        echo "   [warn] $gateway_probe answered $gateway_status with this key (expected 200);" >&2
+        echo "          check ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN in rd.env, then re-run bootstrap.sh." >&2
+        ;;
+    esac
+    ;;
   *)
-    echo "rd-auth: unknown provider '$PROVIDER' (expected vertex, bedrock or anthropic)" >&2
+    echo "rd-auth: unknown provider '$PROVIDER' (expected vertex, bedrock, anthropic or gateway)" >&2
     exit 2
     ;;
 esac
@@ -229,7 +289,15 @@ case "$FORGE" in
       echo "   $FORGE_SCHEME://$FORGE_HOST/-/user_settings/personal_access_tokens?name=remote-dev-vm&scopes=api"
       glab auth login --hostname "$FORGE_HOST"
     fi
-    git config --global "credential.$FORGE_SCHEME://$FORGE_HOST.helper" '!glab auth git-credential'
+    # glab's own git setup writes an empty "reset" entry before its helper, so
+    # the key can hold several values — and a plain `git config key value`
+    # then exits 5 ("cannot overwrite multiple values"), ending the run before
+    # the Git author is set. A glab helper already there, in any form, stays.
+    helper_key="credential.$FORGE_SCHEME://$FORGE_HOST.helper"
+    if ! git config --global --get-all "$helper_key" 2>/dev/null \
+        | grep 'glab auth git-credential$' >/dev/null; then
+      git config --global --replace-all "$helper_key" '!glab auth git-credential'
+    fi
     ;;
   github)
     if gh auth status --hostname "$FORGE_HOST" >/dev/null 2>&1; then

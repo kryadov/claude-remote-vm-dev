@@ -4,15 +4,18 @@ Run **Claude Code sessions server-side** on a VM inside the org perimeter, so
 they keep working while your laptop is off. Reconnect from the laptop to review
 changed files, answer questions, finish or start sessions.
 
-Claude models are reached through one of three providers — **GCP Vertex AI**,
-**Amazon Bedrock**, or the **direct Anthropic API** — chosen per VM and
-overridable per session. Repositories can live on **GitLab or GitHub**
-(github.com and GitHub Enterprise Server alike).
+Claude models are reached through one of four providers — **GCP Vertex AI**,
+**Amazon Bedrock**, the **direct Anthropic API**, or an **Anthropic-compatible
+LLM gateway** such as LiteLLM — chosen per VM and overridable per session.
+Repositories can live on **GitLab or GitHub** (github.com and GitHub
+Enterprise Server alike).
 
 See the full design in
 [`docs/superpowers/specs/2026-08-15-remote-claude-code-vm-design.md`](docs/superpowers/specs/2026-08-15-remote-claude-code-vm-design.md),
-and the multi-provider / multi-forge extension in
-[`docs/superpowers/specs/2026-08-15-github-and-multi-provider-design.md`](docs/superpowers/specs/2026-08-15-github-and-multi-provider-design.md).
+the multi-provider / multi-forge extension in
+[`docs/superpowers/specs/2026-08-15-github-and-multi-provider-design.md`](docs/superpowers/specs/2026-08-15-github-and-multi-provider-design.md),
+and the gateway provider in
+[`docs/superpowers/specs/2026-11-24-llm-gateway-provider-design.md`](docs/superpowers/specs/2026-11-24-llm-gateway-provider-design.md).
 
 ## Daily use
 
@@ -147,11 +150,11 @@ unaffected by the laptop OS.
   `gitlab.com` (for the `glab` package), your Git host, `mcp.atlassian.com`,
   and whichever model endpoint your provider uses — `*.googleapis.com` for
   Vertex, `bedrock-runtime.<region>.amazonaws.com` for Bedrock,
-  `api.anthropic.com` for the direct API (verify — see the design doc's smoke
-  test).
+  `api.anthropic.com` for the direct API, your gateway's host for a gateway
+  (verify — see the design doc's smoke test).
 - Credentials for **one** provider: a Vertex-enabled GCP project, or Bedrock
   access (AWS SSO profile, Bedrock API key, or access keys), or an Anthropic
-  API key / Claude subscription.
+  API key / Claude subscription, or a gateway URL and key.
 
 ## Setup
 
@@ -163,6 +166,7 @@ unaffected by the laptop OS.
    #   vertex    -> GCP_PROJECT_ID, CLOUD_ML_REGION
    #   bedrock   -> AWS_REGION + one of AWS_PROFILE / AWS_BEARER_TOKEN_BEDROCK / access keys
    #   anthropic -> ANTHROPIC_API_KEY, or leave empty to use a Claude subscription
+   #   gateway   -> ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN (+ optional switches)
    ```
 
 2. **Provision the VM — one command from the laptop.** Set `REPO_URL` and a
@@ -190,8 +194,9 @@ unaffected by the laptop OS.
    Bedrock with an SSO profile runs `aws sso login`; Bedrock with a static
    credential and Anthropic with an API key need no login; an Anthropic
    subscription runs `claude setup-token` and stores the token in
-   `~/.config/rd/providers/anthropic.env` (mode 0600). For Jira, start `claude`
-   once and trigger a Jira action to complete its OAuth.
+   `~/.config/rd/providers/anthropic.env` (mode 0600); a gateway needs no
+   login either — rd-auth checks that `<url>/v1/models` accepts the key. For
+   Jira, start `claude` once and trigger a Jira action to complete its OAuth.
 
 ## Model providers
 
@@ -206,7 +211,22 @@ rd-list                               # PROVIDER column shows what each session 
 ```
 
 Only the provider *name* is passed to tmux — credentials stay in the 0600 file,
-out of `ps` output and out of the tmux session environment.
+out of `ps` output and out of the tmux session environment. `rd-start` passes
+it for every new session, the VM default included. Before loading the named
+file, `~/.profile` unsets every provider switch and credential Claude reads —
+the `CLAUDE_CODE_USE_*` provider switches, `ANTHROPIC_API_KEY`,
+`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
+`AWS_BEARER_TOKEN_BEDROCK`, the gateway switches and the
+`ANTHROPIC_DEFAULT_*_MODEL` pins — so whatever a pane inherited (a tmux server
+started by hand keeps its shell's environment), it runs exactly one provider.
+General AWS credentials (`AWS_PROFILE`, `AWS_REGION`, the key pair) and gcloud
+are left alone.
+
+That clearing runs in every login shell, interactive SSH logins included, so
+it also drops your own `~/.bashrc` exports of those names there (a non-login
+shell, such as VS Code's terminal, reads them again). Keep an application's
+`ANTHROPIC_API_KEY` in its project `.env` or compose `env_file`, and Claude
+preferences such as model pins in the `env` block of `~/.claude/settings.json`.
 
 **A running session's provider cannot change.** The pane's environment is fixed
 when it starts, so `rd-start … --provider` against a running session is
@@ -222,6 +242,50 @@ Bedrock has two caveats worth knowing:
   Vertex/Anthropic-shaped value.)
 - **WebSearch is unavailable on Bedrock.** Sessions there simply do not get
   that tool.
+
+### LLM gateway
+
+A gateway — LiteLLM, or any proxy that speaks the Anthropic API — is set with
+`ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` (the gateway's own key, sent
+as `Authorization: Bearer`) in `rd.env`. `bootstrap.sh` writes
+`~/.config/rd/providers/gateway.env` from them, plus `ENABLE_TOOL_SEARCH`,
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` and
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` when those are set; `RD_PROVIDER="gateway"`
+makes it the default. Single-quote the key in `rd.env` (the template does):
+the file is sourced, so inside `"…"` a `$`, `` ` `` or `\` would be expanded.
+From there on it is single-quoted in `gateway.env` too, so a key holding `$`
+or `&` reaches the shell and `rd-auth` intact.
+
+- **No other provider's switch or credential survives into a gateway session
+  — or out of one.** `CLAUDE_CODE_USE_VERTEX` and `CLAUDE_CODE_USE_BEDROCK` win over
+  `ANTHROPIC_BASE_URL`, an inherited `ANTHROPIC_API_KEY` would be sent to the
+  gateway, and an inherited `ANTHROPIC_BASE_URL` would send an `anthropic`
+  session's traffic and key there. The clearing in `~/.profile` (above)
+  handles all of it. The `env` block and `apiKeyHelper` of
+  `~/.claude/settings.json` are applied by Claude itself, after the shell, so
+  keep provider settings out of them.
+- **Model pins must use the gateway's names.** A Vertex id such as
+  `claude-haiku-4-5@20251001` in an `ANTHROPIC_DEFAULT_*_MODEL` pin — easily
+  left in `~/.claude/settings.json` by an earlier Vertex setup — is rejected
+  by a LiteLLM gateway ("no healthy deployments"), and every call to that
+  model fails; for Haiku that is background work you never see failing. The
+  gateway's `/v1/models` lists the names it serves.
+- **Usage metrics come back on.** Claude Code keeps its metrics and `/feedback`
+  uploads off by default only on Vertex, Bedrock and Foundry; behind a gateway
+  it runs in Claude-API mode, where both are on. If your organisation wants
+  them off, set `DISABLE_TELEMETRY=1` and `DISABLE_FEEDBACK_COMMAND=1` — or
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, which also stops feature-flag
+  evaluation — in the `env` block of `~/.claude/settings.json`.
+
+### Removing a provider
+
+`bootstrap.sh` writes provider files but never deletes one. To retire a
+provider — say, moving a VM from Vertex to a gateway — clear its values in
+`rd.env` (or a re-run writes the file back), set `RD_PROVIDER`, re-run
+`bootstrap.sh`, delete `~/.config/rd/providers/<name>.env`, and `rd-stop` /
+`rd-start` the running sessions: a pane keeps the environment it started
+with. Logins you still use for development, such as `gcloud auth` and its ADC,
+are separate and stay as they are.
 
 ## GitLab and GitHub
 
@@ -306,32 +370,43 @@ protection lives at the VM boundary:
   what the agent can reach. Test before enabling on boot.
 
 Each teammate uses their **own VM** and their **own** provider login (`gcloud`
-ADC, AWS SSO, or an Anthropic token), keeping the audit trail clean. Provider
+ADC, AWS SSO, an Anthropic token, or a personal gateway key), keeping the
+audit trail clean. Provider
 credentials live in `~/.config/rd/providers/*.env` at mode 0600 and are never
 written to a tracked file.
 
 ## Layout
 
 ```
-bootstrap.sh                 # idempotent VM installer (run on the VM)
-bootstrap-remote.sh          # laptop-side: clone repo onto the VM + copy rd.env
-connect.sh / .ps1 / .bat     # laptop-side connect (+ optional start/attach, --tui)
+bootstrap.sh                 # idempotent VM installer (run ON the VM)
+bootstrap-remote.sh          # laptop-side: clone repo onto the VM, copy rd.env, run bootstrap
+connect.sh / .ps1 / .bat     # laptop-side SSH helper (reads rd.env); --tui / start+attach
 sessions.sh / .ps1 / .bat    # laptop-side: list VM sessions without attaching
-sync-memory.sh               # laptop-side: sync Claude per-project memory <-> VM
-bin/rd-tui                   # interactive session picker (wraps the rd-* helpers)
-bin/rd-auth                  # one-command authorization: provider + forge + git author
-bin/rd-vscode-init           # add a project-scoped automatic attach task
-bin/rd-attach-here           # attach using the opened worktree path
+sync-memory.sh               # laptop-side: push/pull ~/.claude/projects/<path>/memory
+rd.env.example               # config template -> copy to rd.env (gitignored)
+DEV.md                       # contributor notes (Windows: Hyper-V smoke-test VM)
+bin/rd-*                     # tmux session helpers, installed to ~/.local/bin
+bin/rd-auth                  # one-command VM authorization (provider + forge + git author)
+bin/rd-tui                   # interactive picker; shells out to the other rd-*
+bin/rd-vscode-init           # writes a project-scoped automatic attach task
+bin/rd-attach-here           # attaches the session owning the opened worktree
 bin/rd-claude                # launches Claude with the rd hooks (--settings)
 bin/rd-claude-hook           # hook: records conversation id + idle/busy in tmux
 bin/rd-restart               # restart a session on the installed Claude, resume it
 bin/rd-update                # install the latest Claude (no-op if current)
-rd.env.example               # config template (copy to rd.env)
-DEV.md                       # contributor notes (Windows: Hyper-V smoke-test VM)
-bin/rd-*                     # tmux session helpers (installed to ~/.local/bin)
+tmux.conf                    # installed to ~/.tmux.conf (mouse scrolling) if absent
+tests/lib.sh, tests/stubs/   # shared test helpers and the tmux/ssh/claude stubs
+tests/smoke/                 # real-tmux and real-bootstrap smoke runs (no stubs)
 systemd/tmux-claude.service  # persistent tmux user service
-hardening/                   # sshd, unattended-upgrades, egress allowlist
-tests/                       # stub-driven tests for the rd-* helpers
+hardening/                   # sshd drop-in, unattended-upgrades, egress allowlist
 docs/superpowers/specs/      # design documents
 docs/superpowers/plans/      # implementation plans
+```
+
+Provider config written by `bootstrap.sh` (on the VM, not tracked):
+
+```
+~/.config/rd/provider              # default provider name for new sessions
+~/.config/rd/providers/<name>.env  # 0600, sourced by ~/.profile for that provider
+~/.config/rd/claude-settings.json # rd hooks, rewritten by rd-claude on every launch
 ```

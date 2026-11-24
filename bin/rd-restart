@@ -67,6 +67,17 @@ elif [[ "$existing_project" != "$PROJECT" || "$existing_session" != "$RD_SESSION
   exit 1
 fi
 
+# The respawned login shell loads the session's own provider (respawn-pane
+# keeps RD_PROVIDER). If that provider has since been removed — a VM moved to
+# another one — it would come back with no provider at all, while rd-list
+# still names the old one. Not exit 3: no --force can fix this.
+provider="$(tmux_option @rd_provider)"
+if [[ -n "$provider" && ! -r "${RD_CONFIG_DIR:-$HOME/.config/rd}/providers/$provider.env" ]]; then
+  echo "rd-restart: $PROJECT/$RD_SESSION runs on provider '$provider', which is no longer configured." >&2
+  echo "            Start it again on the current one: rd-stop ${start_hint#rd-start }; $start_hint" >&2
+  exit 1
+fi
+
 if [[ "$UPDATE" -eq 1 ]]; then
   "$RD_BIN/rd-update"
 fi
